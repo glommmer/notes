@@ -1,5 +1,10 @@
 import numpy as np
+from pyspark.context import SparkContext
 
+
+sc = SparkContext.getOrCreate()
+# SparkContext ⇆ ClusterManager ⇆ WorkerNode
+# job 분산 → Resource request, Task schedule, Task execute 등
 
 r_data = [np.random.randn() for _ in range(10)]
 print(r_data)
