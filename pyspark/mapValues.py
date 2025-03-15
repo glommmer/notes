@@ -13,7 +13,7 @@ line_lengths.take(5)
 # Output : [45, 43, 26, 0, 43]
 
 total_length = line_lengths.reduce(lambda a, b: a + b)
-total_length
+print(total_length)
 # Output : 613
 
 lines = text_file.filter(lambda line: "yesterday" in line)
