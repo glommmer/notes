@@ -4,7 +4,7 @@ from pyspark.context import SparkContext
 sc = SparkContext.getOrCreate()
 spark = SparkSession.builder.getOrCreate()
 
-# Creating DataFrame
+# Creare DataFrame from list
 # I am following these steps for creating a DataFrame from list of tuples:
 
 # Create a list of tuples. Each tuple contains name of a person with age.
@@ -33,3 +33,23 @@ print(schema_people.collect())
 
 print(schema_people.count())
 # Output : 4
+
+# Create DataFrame from text file
+geoip_rdd = sc.textFile('/FileStore/sample_data/geoip.txt')
+geoip_rdd1 = geoip_rdd.map(lambda x : x.split(","))
+# ,로 스플릿 -> 리스트 생성
+# list of list, 2 dimension
+geoip_rdd2 = geoip_rdd1.map(lambda x : Row(ip=x[0], code=x[1], country=x[2]))
+geoip_df = spark.createDataFrame(geoip_rdd2)
+geoip_df.show()
+''' 
++---------------+----+------------------+
+|             ip|code|           country|
++---------------+----+------------------+
+|194.120.126.123|  NL|       Netherlands|
+| 94.126.119.173|  FR|            France|
+|  193.46.74.166|  RU|Russian Federation|
+|  46.235.67.202|  RU|Russian Federation|
+| 193.161.193.64|  RU|Russian Federation|
++---------------+----+------------------+ 
+'''
