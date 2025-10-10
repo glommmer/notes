@@ -98,19 +98,6 @@ class DetailedLogger:
 
 
 # ===========================
-# Custom Reducer for Dictionary Merge
-# ===========================
-
-def merge_dicts(existing: dict, updates: dict) -> dict:
-    """병렬 노드에서 반환된 dictionary를 병합하는 reducer"""
-    if existing is None:
-        existing = {}
-    merged = existing.copy()
-    merged.update(updates)
-    return merged
-
-
-# ===========================
 # 1. 문서 처리 및 벡터 저장소 생성
 # ===========================
 
@@ -209,6 +196,96 @@ class MultiQueryGenerator:
         return [question] + queries
 
 
+# ===========================
+# 3. Self-RAG 검증 메커니즘
+# ===========================
+
+class RelevanceGrader(BaseModel):
+    """검색된 문서의 관련성 평가"""
+
+    binary_score: str = Field(description="문서가 질문과 관련있으면 'yes', 아니면 'no'")
+    confidence: int = Field(description="확신도 (1-10)")
+
+
+class AnswerQuality(BaseModel):
+    """생성된 답변의 품질 평가"""
+
+    is_supported: str = Field(description="답변이 문서에 근거하면 'yes', 아니면 'no'")
+    is_useful: str = Field(description="답변이 질문에 유용하면 'yes', 아니면 'no'")
+    needs_refinement: str = Field(description="답변 개선이 필요하면 'yes', 아니면 'no'")
+
+
+class SelfRAGValidator:
+    """Self-RAG 검증 시스템"""
+
+    def __init__(self, llm):
+        self.llm = llm
+        self.grader = llm.with_structured_output(RelevanceGrader)
+        self.quality_checker = llm.with_structured_output(AnswerQuality)
+
+    def grade_documents(
+        self, question: str, documents: List[Document]
+    ) -> List[Document]:
+        """문서 관련성 검증"""
+        grade_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    """당신은 법률 문서 평가 전문가입니다.
+검색된 문서가 질문과 관련이 있는지 평가하세요.
+법률 용어, 조항 번호, 절차적 내용이 일치하면 관련있다고 판단하세요.""",
+                ),
+                ("human", "질문: {question}\n\n문서 내용: {document}"),
+            ]
+        )
+
+        grader_chain = grade_prompt | self.grader
+        filtered_docs = []
+
+        for doc in documents:
+            score = grader_chain.invoke(
+                {"question": question, "document": doc.page_content}
+            )
+
+            if score.binary_score == "yes" and score.confidence >= 6:
+                filtered_docs.append(doc)
+
+        return filtered_docs
+
+    def validate_answer(
+        self, question: str, answer: str, documents: List[Document]
+    ) -> dict:
+        """생성된 답변 검증"""
+        context = "\n\n".join([doc.page_content for doc in documents])
+
+        quality_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "답변이 제공된 문서에 근거하고 질문에 유용한지 평가하세요."),
+                (
+                    "human",
+                    """
+질문: {question}
+답변: {answer}
+참고 문서: {context}
+
+답변을 평가하세요.
+""",
+                ),
+            ]
+        )
+
+        quality_chain = quality_prompt | self.quality_checker
+        quality = quality_chain.invoke(
+            {"question": question, "answer": answer, "context": context}
+        )
+
+        return {
+            "is_supported": quality.is_supported,
+            "is_useful": quality.is_useful,
+            "needs_refinement": quality.needs_refinement,
+        }
+
+
 def main():
     # 1. PDF 처리 및 벡터 저장소 생성 (또는 기존 저장소 로드)
     print("=== 벡터 저장소 로드 ===")
@@ -241,29 +318,8 @@ def main():
 
         vectorstore.save_local(folder_path="./faiss_db2")
 
-    question = """
-[사례]
-온라인 쇼핑몰 'A'사의 개발팀에서 근무하던 **갑(甲)**은 퇴사 직전, 
-회사의 고객 관리 데이터베이스에 접근하여 고객 1만 명의 이름, 주소, 연락처, 구매 내역 등 개인정보를 
-자신의 개인 서버로 무단 유출했습니다.
-
-이후 **갑(甲)**은 유출한 개인정보 중 일부를 이용하여 
-특정 고객 **을(乙)**에게 전화를 걸어 'A'사 직원을 사칭하며 "시스템 오류로 결제가 중복 처리되었으니, 
-환불을 위해 알려주는 특정 계좌로 수수료 10만 원을 먼저 입금하라"고 속여 돈을 편취했습니다.
-
-이 사실을 뒤늦게 알게 된 'A'사는 내부 감사를 통해 **갑(甲)**의 소행임을 파악했고, 
-고객 **을(乙)**을 포함한 다수의 피해자는 'A'사를 상대로 집단적으로 항의하기 시작했습니다.
-
-[문제]
-위 사례를 바탕으로, 갑(甲), 'A'사, 그리고 피해 고객 을(乙) 사이에 발생할 수 있는 법적 문제들을 
-아래 5가지 법률의 관점에서 각각 분석하고 그 근거 조항과 함께 설명하시오.
-
-1. 개인정보보호법: 'A'사와 갑(甲)은 각각 어떤 의무를 위반했으며, 어떤 책임을 지게 되는가?
-2. 형법: 갑(甲)의 행위는 어떤 범죄에 해당하며, 그 이유는 무엇인가?
-3. 민법: 을(乙)은 갑(甲)과 'A'사를 상대로 어떤 권리를 주장하며 손해배상을 청구할 수 있는가? 그 법적 근거는 무엇인가?
-4. 형사소송법: 갑(甲)의 범죄 혐의에 대해 수사기관이 수사를 개시하고 재판에 넘기는 과정은 어떻게 진행되는가?
-5. 민사소송법: 을(乙)이 자신의 금전적, 정신적 피해를 구제받기 위해 법원에 소송을 제기한다면, 그 절차는 어떻게 진행되는가?
-"""
+    print("\n[Step 2] LLM 초기화")
+    print("-" * 80)
 
     llm = AzureChatOpenAI(
         openai_api_version="2024-08-01-preview",
@@ -272,9 +328,126 @@ def main():
         api_key=AOAI_API_KEY,
         azure_endpoint=AOAI_ENDPOINT,
     )
+    print("✅ Azure OpenAI LLM 초기화 완료")
 
-    print(MultiQueryGenerator(llm).generate_queries(question))
+    print("\n[Step 3] Retriever 테스트")
+    print("-" * 80)
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    test_query = "개인정보 유출 시 처리자의 책임은?"
+    print(f"테스트 쿼리: {test_query}")
+
+    docs = retriever.invoke(test_query)
+    print(f"✅ 검색된 문서 수: {len(docs)}")
+
+    if docs:
+        print(f"\n첫 번째 문서 샘플:")
+        print(f"  - 파일명: {docs[0].metadata.get('file_name', 'Unknown')}")
+        print(f"  - 내용 길이: {len(docs[0].page_content)} 문자")
+        print(f"  - 내용 미리보기: {docs[0].page_content[:200]}...")
+
+    print("\n[Step 4] Multi-Query Generator 테스트")
+    print("-" * 80)
+
+    query_generator = MultiQueryGenerator(llm)
+
+    original_question = "개인정보보호법 위반 시 처벌 조항은?"
+    print(f"원본 질문: {original_question}")
+
+    generated_queries = query_generator.generate_queries(original_question)
+    print(f"\n✅ 생성된 쿼리 수: {len(generated_queries)}")
+
+    for i, query in enumerate(generated_queries, 1):
+        print(f"  {i}. {query}")
+
+    # Multi-Query로 검색 테스트
+    print("\n각 쿼리로 문서 검색 중...")
+    all_retrieved_docs = []
+    for i, query in enumerate(generated_queries, 1):
+        docs = retriever.invoke(query)
+        all_retrieved_docs.extend(docs)
+        print(f"  쿼리 {i}: {len(docs)}개 문서 검색됨")
+
+    # 중복 제거
+    unique_docs = []
+    seen_contents = set()
+    for doc in all_retrieved_docs:
+        if doc.page_content not in seen_contents:
+            unique_docs.append(doc)
+            seen_contents.add(doc.page_content)
+
+    print(f"\n✅ 총 검색: {len(all_retrieved_docs)}개 → 중복 제거 후: {len(unique_docs)}개")
+
+    print("\n[Step 5] Self-RAG Validator 테스트")
+    print("-" * 80)
+
+    validator = SelfRAGValidator(llm)
+
+    # 문서 관련성 평가
+    print("\n[5-1] 문서 관련성 평가 (Document Grading)")
+    test_question = "개인정보보호법에서 정보 유출 시 처리자의 의무는?"
+    print(f"질문: {test_question}")
+    print(f"평가 대상 문서 수: {len(unique_docs)}")
+
+    filtered_docs = validator.grade_documents(test_question, unique_docs)
+    print(f"\n✅ 관련성 평가 완료:")
+    print(f"  - 원본 문서: {len(unique_docs)}개")
+    print(f"  - 필터링 후: {len(filtered_docs)}개")
+    print(f"  - 필터링 비율: {(len(filtered_docs) / len(unique_docs) * 100):.1f}%")
+
+    if filtered_docs:
+        print(f"\n필터링된 문서 샘플:")
+        for i, doc in enumerate(filtered_docs[:2], 1):
+            print(f"  {i}. {doc.metadata.get('file_name', 'Unknown')}")
+            print(f"     내용: {doc.page_content[:150]}...")
+
+    # 답변 생성 (간단한 테스트용)
+    print("\n[5-2] 답변 생성 및 품질 검증")
+
+    if filtered_docs:
+        context = "\n\n".join([doc.page_content for doc in filtered_docs[:3]])
+
+        # 간단한 답변 생성 프롬프트
+        answer_prompt = ChatPromptTemplate.from_template("""
+    다음 문서를 참고하여 질문에 답변하세요.
+
+    참고 문서:
+    {context}
+
+    질문: {question}
+
+    답변:
+    """)
+
+        chain = answer_prompt | llm | StrOutputParser()
+        test_answer = chain.invoke({
+            "context": context,
+            "question": test_question
+        })
+
+        print(f"생성된 답변 (길이: {len(test_answer)} 문자):")
+        print(f"{test_answer[:300]}...")
+
+        # 답변 품질 검증
+        print("\n[5-3] 답변 품질 검증")
+        validation_result = validator.validate_answer(
+            test_question,
+            test_answer,
+            filtered_docs[:3]
+        )
+
+        print("\n✅ 검증 결과:")
+        print(f"  - 문서 근거 여부: {validation_result['is_supported']}")
+        print(f"  - 유용성: {validation_result['is_useful']}")
+        print(f"  - 개선 필요: {validation_result['needs_refinement']}")
+
+        if validation_result['needs_refinement'] == 'yes':
+            print("\n⚠️  답변 개선이 필요합니다.")
+        else:
+            print("\n✅ 답변 품질이 양호합니다.")
 
 
 if __name__ == "__main__":
     main()
+
