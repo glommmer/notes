@@ -98,6 +98,19 @@ class DetailedLogger:
 
 
 # ===========================
+# Custom Reducer for Dictionary Merge
+# ===========================
+
+def merge_dicts(existing: dict, updates: dict) -> dict:
+    """병렬 노드에서 반환된 dictionary를 병합하는 reducer"""
+    if existing is None:
+        existing = {}
+    merged = existing.copy()
+    merged.update(updates)
+    return merged
+
+
+# ===========================
 # 1. 문서 처리 및 벡터 저장소 생성
 # ===========================
 
@@ -286,6 +299,478 @@ class SelfRAGValidator:
         }
 
 
+# ===========================
+# 4. Multi-Agent 시스템
+# ===========================
+
+class LegalAgentState(TypedDict):
+    """Agent 상태 정의"""
+
+    question: str
+    law_type: str
+    queries: List[str]
+    documents: List[Document]
+    filtered_documents: List[Document]
+    answer: str
+    validation_result: dict
+    needs_refinement: bool
+
+
+class LegalAgent:
+    """특정 법률 전문 Agent with detailed logging"""
+
+    def __init__(self, law_type: str, llm, retriever, validator):
+        self.law_type = law_type
+        self.llm = llm
+        self.retriever = retriever
+        self.validator = validator
+        self.logger = DetailedLogger()
+
+        self.prompts = {
+            "개인정보보호법": """당신은 개인정보보호법 전문가입니다.
+개인정보 처리자의 의무, 정보주체의 권리, 위반 시 제재를 중심으로 답변하세요.""",
+            "형법": """당신은 형법 전문가입니다.
+구성요건, 위법성, 책임, 형벌의 종류를 명확히 설명하세요.""",
+            "민법": """당신은 민법 전문가입니다.
+불법행위, 손해배상청구권, 계약 관계를 중심으로 답변하세요.""",
+            "형사소송법": """당신은 형사소송법 전문가입니다.
+수사 절차, 공판 절차, 증거법칙을 명확히 설명하세요.""",
+            "민사소송법": """당신은 민사소송법 전문가입니다.
+소송 제기, 심리 절차, 판결의 효력을 설명하세요.""",
+        }
+
+    def retrieve_documents(self, state: LegalAgentState) -> LegalAgentState:
+        """다중 쿼리로 문서 검색 with logging"""
+        import time
+
+        start_time = time.time()
+
+        self.logger.log_node_start(
+            f"{self.law_type} - Retrieve", {"queries_count": len(state["queries"])}
+        )
+
+        try:
+            all_docs = []
+            for i, query in enumerate(state["queries"], 1):
+                logger.info(f"  Query {i}/{len(state['queries'])}: {query[:50]}...")
+                docs = self.retriever.invoke(query)
+                all_docs.extend(docs)
+                logger.info(f"    Retrieved: {len(docs)} documents")
+
+            # 중복 제거
+            unique_docs = []
+            seen_contents = set()
+            for doc in all_docs:
+                if doc.page_content not in seen_contents:
+                    unique_docs.append(doc)
+                    seen_contents.add(doc.page_content)
+
+            state["documents"] = unique_docs
+
+            duration = time.time() - start_time
+            logger.info(f"📊 Total documents: {len(all_docs)}")
+            logger.info(f"📊 Unique documents: {len(unique_docs)}")
+            logger.info(
+                f"📊 Deduplication rate: {(1 - len(unique_docs) / len(all_docs)) * 100:.1f}%"
+            )
+
+            self.logger.log_node_end(
+                f"{self.law_type} - Retrieve",
+                {"documents_count": len(unique_docs)},
+                duration,
+            )
+
+        except Exception as e:
+            self.logger.log_error(f"{self.law_type} - Retrieve", e)
+            raise
+
+        return state
+
+    def grade_documents(self, state: LegalAgentState) -> LegalAgentState:
+        """문서 관련성 검증 with logging"""
+        import time
+
+        start_time = time.time()
+
+        self.logger.log_node_start(
+            f"{self.law_type} - Grade", {"documents_to_grade": len(state["documents"])}
+        )
+
+        try:
+            filtered = self.validator.grade_documents(
+                state["question"], state["documents"]
+            )
+
+            state["filtered_documents"] = filtered
+
+            duration = time.time() - start_time
+            self.logger.log_documents(
+                self.law_type, len(state["documents"]), len(filtered)
+            )
+
+            # 필터링된 문서의 메타데이터 로그
+            if filtered:
+                logger.info(f"  📑 Sample filtered documents:")
+                for i, doc in enumerate(filtered[:3], 1):
+                    logger.info(
+                        f"    {i}. {doc.metadata.get('file_name', 'Unknown')} - {len(doc.page_content)} chars"
+                    )
+
+            self.logger.log_node_end(
+                f"{self.law_type} - Grade", {"filtered_count": len(filtered)}, duration
+            )
+
+        except Exception as e:
+            self.logger.log_error(f"{self.law_type} - Grade", e)
+            raise
+
+        return state
+
+    def generate_answer(self, state: LegalAgentState) -> LegalAgentState:
+        """답변 생성 with logging"""
+        import time
+
+        start_time = time.time()
+
+        self.logger.log_node_start(
+            f"{self.law_type} - Generate",
+            {"context_docs": len(state["filtered_documents"])},
+        )
+
+        try:
+            context = "\n\n".join(
+                [doc.page_content for doc in state["filtered_documents"]]
+            )
+            context_length = len(context)
+
+            logger.info(f"  📝 Context length: {context_length} characters")
+            logger.info(f"  📝 Question: {state['question'][:100]}...")
+
+            prompt = ChatPromptTemplate.from_template(
+                f"""
+{self.prompts[self.law_type]}
+
+# 참고 조문:
+{{context}}
+
+# 질문:
+{{question}}
+
+# 답변 작성 지침:
+1. 관련 법률 조항을 명시하세요 (예: 개인정보보호법 제X조)
+2. 구체적 사례에 적용하여 설명하세요
+3. 법적 책임과 절차를 명확히 하세요
+4. 한국어로 답변하세요
+
+# {self.law_type} 관점 답변:
+"""
+            )
+
+            chain = prompt | self.llm | StrOutputParser()
+            answer = chain.invoke({"context": context, "question": state["question"]})
+
+            state["answer"] = answer
+
+            duration = time.time() - start_time
+            logger.info(f"  📝 Answer length: {len(answer)} characters")
+            logger.info(f"  📝 Answer preview: {answer[:200]}...")
+
+            self.logger.log_node_end(
+                f"{self.law_type} - Generate", {"answer_length": len(answer)}, duration
+            )
+
+        except Exception as e:
+            self.logger.log_error(f"{self.law_type} - Generate", e)
+            raise
+
+        return state
+
+    def validate_answer(self, state: LegalAgentState) -> LegalAgentState:
+        """답변 검증 with logging"""
+        import time
+
+        start_time = time.time()
+
+        self.logger.log_node_start(f"{self.law_type} - Validate")
+
+        try:
+            validation = self.validator.validate_answer(
+                state["question"], state["answer"], state["filtered_documents"]
+            )
+
+            state["validation_result"] = validation
+            state["needs_refinement"] = validation["needs_refinement"] == "yes"
+
+            duration = time.time() - start_time
+            self.logger.log_validation(self.law_type, validation)
+
+            if state["needs_refinement"]:
+                logger.warning(f"  ⚠️  Answer needs refinement!")
+            else:
+                logger.info(f"  ✅ Answer quality is acceptable")
+
+            self.logger.log_node_end(
+                f"{self.law_type} - Validate",
+                {"needs_refinement": state["needs_refinement"]},
+                duration,
+            )
+
+        except Exception as e:
+            self.logger.log_error(f"{self.law_type} - Validate", e)
+            raise
+
+        return state
+
+    def refine_answer(self, state: LegalAgentState) -> LegalAgentState:
+        """답변 개선 with logging"""
+        if not state["needs_refinement"]:
+            logger.info(
+                f"  ⏭️  [{self.law_type}] Refinement skipped - answer is acceptable"
+            )
+            return state
+
+        import time
+
+        start_time = time.time()
+
+        self.logger.log_node_start(f"{self.law_type} - Refine")
+
+        try:
+            logger.info(f"  🔧 Refining answer...")
+            logger.info(f"  📝 Original answer length: {len(state['answer'])} chars")
+
+            refine_prompt = ChatPromptTemplate.from_template(
+                """
+이전 답변에 문제가 있습니다. 다음 사항을 개선하여 답변을 재작성하세요:
+
+1. 문서에 근거한 내용만 포함
+2. 더 구체적인 법률 조항 인용
+3. 사례에 직접 적용 가능한 설명
+
+원본 질문: {question}
+이전 답변: {previous_answer}
+참고 문서: {context}
+
+개선된 답변:
+"""
+            )
+
+            context = "\n\n".join(
+                [doc.page_content for doc in state["filtered_documents"]]
+            )
+            chain = refine_prompt | self.llm | StrOutputParser()
+
+            improved_answer = chain.invoke(
+                {
+                    "question": state["question"],
+                    "previous_answer": state["answer"],
+                    "context": context,
+                }
+            )
+
+            logger.info(f"  📝 Refined answer length: {len(improved_answer)} chars")
+            logger.info(
+                f"  📝 Length change: {len(improved_answer) - len(state['answer']):+d} chars"
+            )
+
+            state["answer"] = improved_answer
+            state["needs_refinement"] = False
+
+            duration = time.time() - start_time
+            self.logger.log_node_end(
+                f"{self.law_type} - Refine",
+                {"refined_length": len(improved_answer)},
+                duration,
+            )
+
+        except Exception as e:
+            self.logger.log_error(f"{self.law_type} - Refine", e)
+            raise
+
+        return state
+
+
+# ===========================
+# 5. Multi-Agent Supervisor
+# ===========================
+
+class SupervisorState(TypedDict):
+    """Supervisor 상태 - Annotated로 병렬 업데이트 지원"""
+
+    original_question: str
+    sub_questions: Annotated[dict, merge_dicts]  # 병렬 업데이트 허용
+    agent_results: Annotated[dict, merge_dicts]  # 병렬 업데이트 허용
+    final_answer: str
+
+
+def create_multi_agent_system(vectorstore):
+    """Multi-Agent RAG 시스템 생성"""
+
+    llm = AzureChatOpenAI(
+        openai_api_version="2024-08-01-preview",
+        azure_deployment=AOAI_DEPLOY_GPT4O_MINI,
+        temperature=0.0,
+        api_key=AOAI_API_KEY,
+        azure_endpoint=AOAI_ENDPOINT,
+    )
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    validator = SelfRAGValidator(llm)
+    query_generator = MultiQueryGenerator(llm)
+
+    # 법률별 Agent 생성 - 매핑 사용
+    law_types = ["개인정보보호법", "형법", "민법", "형사소송법", "민사소송법"]
+
+    # 영문 노드 이름 매핑
+    node_name_map = {
+        "개인정보보호법": "privacy_law",
+        "형법": "criminal_law",
+        "민법": "civil_law",
+        "형사소송법": "criminal_procedure",
+        "민사소송법": "civil_procedure",
+    }
+
+    # 역방향 매핑
+    law_type_map = {v: k for k, v in node_name_map.items()}
+
+    agents = {
+        node_name: LegalAgent(law_type, llm, retriever, validator)
+        for law_type, node_name in node_name_map.items()
+    }
+
+    def supervisor_node(state: SupervisorState) -> SupervisorState:
+        """질문을 분석하고 각 법률별 sub-question 생성"""
+        print("\n=== Supervisor: 질문 분석 중 ===")
+
+        prompt = ChatPromptTemplate.from_template(
+            """
+다음 법률 사례를 분석하여 각 법률 관점에서 답변해야 할 세부 질문을 생성하세요.
+
+원본 질문:
+{question}
+
+5가지 법률 관점:
+1. 개인정보보호법
+2. 형법
+3. 민법
+4. 형사소송법
+5. 민사소송법
+
+각 법률 관점에서 구체적으로 답변할 질문을 한 줄씩 작성하세요.
+형식: 
+개인정보보호법: [질문]
+형법: [질문]
+...
+"""
+        )
+
+        chain = prompt | llm | StrOutputParser()
+        result = chain.invoke({"question": state["original_question"]})
+
+        # 결과 파싱
+        sub_questions = {}
+        for line in result.split("\n"):
+            line = line.strip()
+            if ":" in line:
+                law_type = line.split(":")[0].strip()
+                question = line.split(":", 1)[1].strip()
+                if law_type in law_types:
+                    # 영문 노드 이름으로 저장
+                    node_name = node_name_map[law_type]
+                    sub_questions[node_name] = question
+
+        return {"sub_questions": sub_questions}
+
+    def agent_executor_node(node_name: str, state: SupervisorState) -> dict:
+        """특정 법률 Agent 실행 - dictionary만 반환"""
+        agent = agents[node_name]
+        question = state["sub_questions"].get(node_name, state["original_question"])
+
+        # Multi-Query 생성
+        queries = query_generator.generate_queries(question)
+
+        # Agent 상태 초기화
+        agent_state = LegalAgentState(
+            question=question,
+            law_type=agent.law_type,  # 실제 한글 법률명
+            queries=queries,
+            documents=[],
+            filtered_documents=[],
+            answer="",
+            validation_result={},
+            needs_refinement=False,
+        )
+
+        # Agent 워크플로우 실행
+        agent_state = agent.retrieve_documents(agent_state)
+        agent_state = agent.grade_documents(agent_state)
+        agent_state = agent.generate_answer(agent_state)
+        agent_state = agent.validate_answer(agent_state)
+        agent_state = agent.refine_answer(agent_state)
+
+        # agent_results에 영문 노드 이름으로 저장
+        return {"agent_results": {node_name: agent_state["answer"]}}
+
+    def aggregator_node(state: SupervisorState) -> dict:
+        """각 Agent 결과를 종합"""
+        print("\n=== Aggregator: 최종 답변 생성 중 ===")
+
+        # 영문 노드 이름을 한글로 변환하여 답변 결합
+        combined_answers = "\n\n".join(
+            [
+                f"## {law_type_map[node_name]}\n{answer}"
+                for node_name, answer in state["agent_results"].items()
+            ]
+        )
+
+        final_prompt = ChatPromptTemplate.from_template(
+            """
+다음은 5가지 법률 관점에서 분석한 결과입니다.
+이를 종합하여 사용자가 이해하기 쉽게 구조화된 최종 답변을 작성하세요.
+
+원본 질문:
+{question}
+
+각 법률별 분석:
+{combined_answers}
+
+최종 종합 답변 (각 법률 관점을 모두 포함하여 구조화):
+        """
+        )
+
+        chain = final_prompt | llm | StrOutputParser()
+        final_answer = chain.invoke(
+            {
+                "question": state["original_question"],
+                "combined_answers": combined_answers,
+            }
+        )
+
+        return {"final_answer": final_answer}
+
+    # LangGraph 구성
+    workflow = StateGraph(SupervisorState)
+
+    # 노드 추가 - 영문 이름 사용
+    workflow.add_node("supervisor", supervisor_node)
+    for node_name in node_name_map.values():
+        workflow.add_node(node_name, lambda s, nn=node_name: agent_executor_node(nn, s))
+    workflow.add_node("aggregator", aggregator_node)
+
+    # 엣지 구성
+    workflow.add_edge(START, "supervisor")
+    for node_name in node_name_map.values():
+        workflow.add_edge("supervisor", node_name)
+        workflow.add_edge(node_name, "aggregator")
+    workflow.add_edge("aggregator", END)
+
+    return workflow.compile()
+
+
+# ===========================
+# 6. 실행 코드
+# ===========================
+
 def main():
     # 1. PDF 처리 및 벡터 저장소 생성 (또는 기존 저장소 로드)
     print("=== 벡터 저장소 로드 ===")
@@ -318,136 +803,80 @@ def main():
 
         vectorstore.save_local(folder_path="./faiss_db2")
 
-    print("\n[Step 2] LLM 초기화")
-    print("-" * 80)
+    # 2. Multi-Agent 시스템 생성
+    print("\n=== Multi-Agent 시스템 초기화 ===")
+    app = create_multi_agent_system(vectorstore)
 
-    llm = AzureChatOpenAI(
-        openai_api_version="2024-08-01-preview",
-        azure_deployment=AOAI_DEPLOY_GPT4O_MINI,
-        temperature=0.0,
-        api_key=AOAI_API_KEY,
-        azure_endpoint=AOAI_ENDPOINT,
-    )
-    print("✅ Azure OpenAI LLM 초기화 완료")
+    # from IPython.display import Image, display
+    #
+    # display(
+    #     Image(
+    #         app.get_graph().draw_mermaid_png()
+    #     )
+    # )
 
-    print("\n[Step 3] Retriever 테스트")
-    print("-" * 80)
+    # 3. 질문 실행
+    question = """
+[사례]
+온라인 쇼핑몰 'A'사의 개발팀에서 근무하던 **갑(甲)**은 퇴사 직전, 
+회사의 고객 관리 데이터베이스에 접근하여 고객 1만 명의 이름, 주소, 연락처, 구매 내역 등 개인정보를 
+자신의 개인 서버로 무단 유출했습니다.
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+이후 **갑(甲)**은 유출한 개인정보 중 일부를 이용하여 
+특정 고객 **을(乙)**에게 전화를 걸어 'A'사 직원을 사칭하며 "시스템 오류로 결제가 중복 처리되었으니, 
+환불을 위해 알려주는 특정 계좌로 수수료 10만 원을 먼저 입금하라"고 속여 돈을 편취했습니다.
 
-    test_query = "개인정보 유출 시 처리자의 책임은?"
-    print(f"테스트 쿼리: {test_query}")
+이 사실을 뒤늦게 알게 된 'A'사는 내부 감사를 통해 **갑(甲)**의 소행임을 파악했고, 
+고객 **을(乙)**을 포함한 다수의 피해자는 'A'사를 상대로 집단적으로 항의하기 시작했습니다.
 
-    docs = retriever.invoke(test_query)
-    print(f"✅ 검색된 문서 수: {len(docs)}")
+[문제]
+위 사례를 바탕으로, 갑(甲), 'A'사, 그리고 피해 고객 을(乙) 사이에 발생할 수 있는 법적 문제들을 
+아래 5가지 법률의 관점에서 각각 분석하고 그 근거 조항과 함께 설명하시오.
 
-    if docs:
-        print(f"\n첫 번째 문서 샘플:")
-        print(f"  - 파일명: {docs[0].metadata.get('file_name', 'Unknown')}")
-        print(f"  - 내용 길이: {len(docs[0].page_content)} 문자")
-        print(f"  - 내용 미리보기: {docs[0].page_content[:200]}...")
+1. 개인정보보호법: 'A'사와 갑(甲)은 각각 어떤 의무를 위반했으며, 어떤 책임을 지게 되는가?
+2. 형법: 갑(甲)의 행위는 어떤 범죄에 해당하며, 그 이유는 무엇인가?
+3. 민법: 을(乙)은 갑(甲)과 'A'사를 상대로 어떤 권리를 주장하며 손해배상을 청구할 수 있는가? 그 법적 근거는 무엇인가?
+4. 형사소송법: 갑(甲)의 범죄 혐의에 대해 수사기관이 수사를 개시하고 재판에 넘기는 과정은 어떻게 진행되는가?
+5. 민사소송법: 을(乙)이 자신의 금전적, 정신적 피해를 구제받기 위해 법원에 소송을 제기한다면, 그 절차는 어떻게 진행되는가?
+"""
 
-    print("\n[Step 4] Multi-Query Generator 테스트")
-    print("-" * 80)
+    print("\n=== 질문 처리 시작 ===")
+    logger.info("=" * 80)
+    logger.info("🎬 EXECUTION START")
+    logger.info("=" * 80)
 
-    query_generator = MultiQueryGenerator(llm)
+    state = {
+        "original_question": question,
+        "sub_questions": {},
+        "agent_results": {},
+        "final_answer": "",
+    }
 
-    original_question = "개인정보보호법 위반 시 처벌 조항은?"
-    print(f"원본 질문: {original_question}")
+    # final_state = None
+    # for update in app.stream(state, stream_mode="updates"):
+    #     logger.info(f"📦 State Update: {list(update.keys())}")
+    #     for node_name, node_output in update.items():
+    #         logger.info(f"  [{node_name}] completed")
+    #         # 각 노드의 출력 상세 로그
+    #         if isinstance(node_output, dict):
+    #             for key, value in node_output.items():
+    #                 if isinstance(value, str):
+    #                     logger.info(f"    {key}: {value[:100]}...")
+    #                 else:
+    #                     logger.info(f"    {key}: {type(value)}")
+    #     final_state = update
 
-    generated_queries = query_generator.generate_queries(original_question)
-    print(f"\n✅ 생성된 쿼리 수: {len(generated_queries)}")
+    result = app.invoke(state)
 
-    for i, query in enumerate(generated_queries, 1):
-        print(f"  {i}. {query}")
+    logger.info("=" * 80)
+    logger.info("🏁 EXECUTION COMPLETE")
+    logger.info("=" * 80)
 
-    # Multi-Query로 검색 테스트
-    print("\n각 쿼리로 문서 검색 중...")
-    all_retrieved_docs = []
-    for i, query in enumerate(generated_queries, 1):
-        docs = retriever.invoke(query)
-        all_retrieved_docs.extend(docs)
-        print(f"  쿼리 {i}: {len(docs)}개 문서 검색됨")
-
-    # 중복 제거
-    unique_docs = []
-    seen_contents = set()
-    for doc in all_retrieved_docs:
-        if doc.page_content not in seen_contents:
-            unique_docs.append(doc)
-            seen_contents.add(doc.page_content)
-
-    print(f"\n✅ 총 검색: {len(all_retrieved_docs)}개 → 중복 제거 후: {len(unique_docs)}개")
-
-    print("\n[Step 5] Self-RAG Validator 테스트")
-    print("-" * 80)
-
-    validator = SelfRAGValidator(llm)
-
-    # 문서 관련성 평가
-    print("\n[5-1] 문서 관련성 평가 (Document Grading)")
-    test_question = "개인정보보호법에서 정보 유출 시 처리자의 의무는?"
-    print(f"질문: {test_question}")
-    print(f"평가 대상 문서 수: {len(unique_docs)}")
-
-    filtered_docs = validator.grade_documents(test_question, unique_docs)
-    print(f"\n✅ 관련성 평가 완료:")
-    print(f"  - 원본 문서: {len(unique_docs)}개")
-    print(f"  - 필터링 후: {len(filtered_docs)}개")
-    print(f"  - 필터링 비율: {(len(filtered_docs) / len(unique_docs) * 100):.1f}%")
-
-    if filtered_docs:
-        print(f"\n필터링된 문서 샘플:")
-        for i, doc in enumerate(filtered_docs[:2], 1):
-            print(f"  {i}. {doc.metadata.get('file_name', 'Unknown')}")
-            print(f"     내용: {doc.page_content[:150]}...")
-
-    # 답변 생성 (간단한 테스트용)
-    print("\n[5-2] 답변 생성 및 품질 검증")
-
-    if filtered_docs:
-        context = "\n\n".join([doc.page_content for doc in filtered_docs[:3]])
-
-        # 간단한 답변 생성 프롬프트
-        answer_prompt = ChatPromptTemplate.from_template("""
-    다음 문서를 참고하여 질문에 답변하세요.
-
-    참고 문서:
-    {context}
-
-    질문: {question}
-
-    답변:
-    """)
-
-        chain = answer_prompt | llm | StrOutputParser()
-        test_answer = chain.invoke({
-            "context": context,
-            "question": test_question
-        })
-
-        print(f"생성된 답변 (길이: {len(test_answer)} 문자):")
-        print(f"{test_answer[:300]}...")
-
-        # 답변 품질 검증
-        print("\n[5-3] 답변 품질 검증")
-        validation_result = validator.validate_answer(
-            test_question,
-            test_answer,
-            filtered_docs[:3]
-        )
-
-        print("\n✅ 검증 결과:")
-        print(f"  - 문서 근거 여부: {validation_result['is_supported']}")
-        print(f"  - 유용성: {validation_result['is_useful']}")
-        print(f"  - 개선 필요: {validation_result['needs_refinement']}")
-
-        if validation_result['needs_refinement'] == 'yes':
-            print("\n⚠️  답변 개선이 필요합니다.")
-        else:
-            print("\n✅ 답변 품질이 양호합니다.")
+    print("\n" + "=" * 80)
+    print("최종 답변:")
+    print("=" * 80)
+    print(result["final_answer"])
 
 
 if __name__ == "__main__":
     main()
-
