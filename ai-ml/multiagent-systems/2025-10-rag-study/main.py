@@ -1,13 +1,21 @@
 import os
 import re
+import json
 import tqdm
 import logging
+import operator
 from pathlib import Path
 from datetime import datetime
+from pydantic import BaseModel, Field
+from typing import List, TypedDict, Annotated
+from langchain.docstore.document import Document
 from langchain.document_loaders import PDFPlumberLoader
 from langchain.text_splitter import MarkdownHeaderTextSplitter
-from langchain_openai import AzureOpenAIEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langgraph.graph import StateGraph, START, END
 
 
 # 환경 변수 설정
@@ -90,6 +98,19 @@ class DetailedLogger:
 
 
 # ===========================
+# Custom Reducer for Dictionary Merge
+# ===========================
+
+def merge_dicts(existing: dict, updates: dict) -> dict:
+    """병렬 노드에서 반환된 dictionary를 병합하는 reducer"""
+    if existing is None:
+        existing = {}
+    merged = existing.copy()
+    merged.update(updates)
+    return merged
+
+
+# ===========================
 # 1. 문서 처리 및 벡터 저장소 생성
 # ===========================
 
@@ -150,6 +171,44 @@ def process_multiple_pdfs(directory_path):
     return all_splits
 
 
+# ===========================
+# 2. Multi-Query Retrieval
+# ===========================
+
+class MultiQueryGenerator:
+    """사용자 질문을 다양한 관점에서 재작성"""
+
+    def __init__(self, llm):
+        self.llm = llm
+        self.prompt = ChatPromptTemplate.from_template(
+            """
+당신은 법률 전문가입니다. 사용자의 질문을 분석하여 다양한 관점에서 4가지 버전의 질문을 생성하세요.
+
+원본 질문: {question}
+
+다음 4가지 전략을 사용하여 질문을 재작성하세요:
+1. 핵심 키워드 추출 버전 (법률 용어 중심)
+2. 구체적 조항 검색 버전 (제X조, 제X편 등)
+3. 사례 기반 버전 (실무 적용 관점)
+4. 절차적 관점 버전 (어떻게 진행되는가)
+
+각 질문은 한 줄로 작성하고, 번호를 붙여주세요.
+"""
+        )
+
+    def generate_queries(self, question: str) -> List[str]:
+        """다양한 관점의 질문 생성"""
+        chain = self.prompt | self.llm | StrOutputParser()
+        result = chain.invoke({"question": question})
+
+        queries = [
+            line.strip()
+            for line in result.split("\n")
+            if line.strip() and any(char.isdigit() for char in line[:3])
+        ]
+        return [question] + queries
+
+
 def main():
     # 1. PDF 처리 및 벡터 저장소 생성 (또는 기존 저장소 로드)
     print("=== 벡터 저장소 로드 ===")
@@ -182,7 +241,40 @@ def main():
 
         vectorstore.save_local(folder_path="./faiss_db2")
 
+    question = """
+[사례]
+온라인 쇼핑몰 'A'사의 개발팀에서 근무하던 **갑(甲)**은 퇴사 직전, 
+회사의 고객 관리 데이터베이스에 접근하여 고객 1만 명의 이름, 주소, 연락처, 구매 내역 등 개인정보를 
+자신의 개인 서버로 무단 유출했습니다.
+
+이후 **갑(甲)**은 유출한 개인정보 중 일부를 이용하여 
+특정 고객 **을(乙)**에게 전화를 걸어 'A'사 직원을 사칭하며 "시스템 오류로 결제가 중복 처리되었으니, 
+환불을 위해 알려주는 특정 계좌로 수수료 10만 원을 먼저 입금하라"고 속여 돈을 편취했습니다.
+
+이 사실을 뒤늦게 알게 된 'A'사는 내부 감사를 통해 **갑(甲)**의 소행임을 파악했고, 
+고객 **을(乙)**을 포함한 다수의 피해자는 'A'사를 상대로 집단적으로 항의하기 시작했습니다.
+
+[문제]
+위 사례를 바탕으로, 갑(甲), 'A'사, 그리고 피해 고객 을(乙) 사이에 발생할 수 있는 법적 문제들을 
+아래 5가지 법률의 관점에서 각각 분석하고 그 근거 조항과 함께 설명하시오.
+
+1. 개인정보보호법: 'A'사와 갑(甲)은 각각 어떤 의무를 위반했으며, 어떤 책임을 지게 되는가?
+2. 형법: 갑(甲)의 행위는 어떤 범죄에 해당하며, 그 이유는 무엇인가?
+3. 민법: 을(乙)은 갑(甲)과 'A'사를 상대로 어떤 권리를 주장하며 손해배상을 청구할 수 있는가? 그 법적 근거는 무엇인가?
+4. 형사소송법: 갑(甲)의 범죄 혐의에 대해 수사기관이 수사를 개시하고 재판에 넘기는 과정은 어떻게 진행되는가?
+5. 민사소송법: 을(乙)이 자신의 금전적, 정신적 피해를 구제받기 위해 법원에 소송을 제기한다면, 그 절차는 어떻게 진행되는가?
+"""
+
+    llm = AzureChatOpenAI(
+        openai_api_version="2024-08-01-preview",
+        azure_deployment=AOAI_DEPLOY_GPT4O_MINI,
+        temperature=0.0,
+        api_key=AOAI_API_KEY,
+        azure_endpoint=AOAI_ENDPOINT,
+    )
+
+    print(MultiQueryGenerator(llm).generate_queries(question))
+
 
 if __name__ == "__main__":
     main()
-
