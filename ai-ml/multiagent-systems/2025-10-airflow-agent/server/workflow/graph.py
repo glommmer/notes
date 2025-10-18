@@ -1,0 +1,226 @@
+"""
+LangGraph Workflow Definition - Orchestrates multi-agent workflow
+"""
+
+import logging
+from typing import Literal
+from langgraph.graph import StateGraph, END
+from server.workflow.state import AgentState, create_initial_state
+from server.agents import (
+    AirflowMonitorAgent,
+    ErrorAnalyzerAgent,
+    UserInteractionAgent,
+    ActionAgent,
+)
+from server.services.airflow_client import AirflowClient
+from server.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def create_monitoring_graph(session_id: str = None) -> StateGraph:
+    """
+    Create the monitoring workflow graph
+
+    This graph orchestrates the multi-agent workflow:
+    1. Monitor → Detect failed DAG runs/tasks
+    2. Analyzer → Analyze errors and find solutions
+    3. Interaction → Ask user for decision
+    4. Action → Execute approved action
+    5. END
+
+    Args:
+        session_id: Optional session identifier for tracking
+
+    Returns:
+        Compiled StateGraph ready for execution
+    """
+    logger.info("Creating monitoring workflow graph...")
+
+    try:
+        # Initialize Airflow client
+        airflow_client = AirflowClient()
+        logger.info("Airflow client initialized")
+
+        # Initialize agents
+        monitor_agent = AirflowMonitorAgent(airflow_client)
+        analyzer_agent = ErrorAnalyzerAgent(airflow_client)
+        interaction_agent = UserInteractionAgent()
+        action_agent = ActionAgent(airflow_client)
+        logger.info("All agents initialized")
+
+        # Create state graph
+        workflow = StateGraph(AgentState)
+
+        # Add nodes for each agent
+        workflow.add_node("monitor", monitor_agent)
+        workflow.add_node("analyzer", analyzer_agent)
+        workflow.add_node("interaction", interaction_agent)
+        workflow.add_node("action", action_agent)
+
+        logger.info("Nodes added to workflow")
+
+        # Define conditional routing functions
+        def should_analyze(state: AgentState) -> Literal["analyzer", "end"]:
+            """
+            Decide whether to proceed to analysis
+
+            Returns:
+                "analyzer" if error found, "end" if no errors or already resolved
+            """
+            # Check if monitoring found an error
+            if state.get("is_resolved"):
+                logger.info("No errors to analyze - workflow ending")
+                return "end"
+
+            if not state.get("dag_id") or not state.get("task_id"):
+                logger.warning("No task identified for analysis - workflow ending")
+                return "end"
+
+            logger.info("Proceeding to error analysis")
+            return "analyzer"
+
+        def should_interact(state: AgentState) -> Literal["interaction", "end"]:
+            """
+            Decide whether to proceed to user interaction
+
+            Returns:
+                "interaction" if analysis complete, "end" if failed
+            """
+            if not state.get("analysis_report"):
+                logger.warning("No analysis report available - workflow ending")
+                return "end"
+
+            logger.info("Proceeding to user interaction")
+            return "interaction"
+
+        def should_act(state: AgentState) -> Literal["action", "interaction", "end"]:
+            """
+            Decide whether to execute action or wait for user input
+
+            Returns:
+                "action" if user input received
+                "interaction" if waiting for input
+                "end" if resolved
+            """
+            if state.get("is_resolved"):
+                logger.info("Issue already resolved - workflow ending")
+                return "end"
+
+            # Check if we're waiting for user input
+            if state.get("requires_user_input") and not state.get("user_input"):
+                logger.info("Waiting for user input - staying in interaction")
+                return "interaction"
+
+            # Check if we have a decision
+            if state.get("final_action"):
+                logger.info("Proceeding to action execution")
+                return "action"
+
+            # Process user input if available
+            if state.get("user_input"):
+                logger.info("Processing user input")
+                return "interaction"
+
+            logger.warning("No clear path forward - workflow ending")
+            return "end"
+
+        def should_end(state: AgentState) -> Literal["end", "interaction"]:
+            """
+            Decide whether workflow should end or continue
+
+            Returns:
+                "end" if resolved or no more actions needed
+                "interaction" if waiting for more user input
+            """
+            if state.get("is_resolved"):
+                logger.info("Workflow completed successfully")
+                return "end"
+
+            # Check if still waiting for user input
+            if state.get("requires_user_input") and not state.get("user_input"):
+                logger.info("Still waiting for user input")
+                return "interaction"
+
+            # Check iteration count to prevent infinite loops
+            iteration = state.get("iteration_count", 0)
+            max_iterations = state.get("max_iterations", 5)
+
+            if iteration >= max_iterations:
+                logger.warning(
+                    f"Max iterations ({max_iterations}) reached - workflow ending"
+                )
+                return "end"
+
+            return "end"
+
+        # Set entry point
+        workflow.set_entry_point("monitor")
+
+        # Add edges with conditional routing
+        workflow.add_conditional_edges(
+            "monitor", should_analyze, {"analyzer": "analyzer", "end": END}
+        )
+
+        workflow.add_conditional_edges(
+            "analyzer", should_interact, {"interaction": "interaction", "end": END}
+        )
+
+        workflow.add_conditional_edges(
+            "interaction",
+            should_act,
+            {"action": "action", "interaction": "interaction", "end": END},
+        )
+
+        workflow.add_conditional_edges(
+            "action", should_end, {"end": END, "interaction": "interaction"}
+        )
+
+        # Compile the graph
+        logger.info("Compiling workflow graph...")
+        app = workflow.compile()
+
+        logger.info("Workflow graph created and compiled successfully")
+
+        return app
+
+    except Exception as e:
+        logger.error(f"Failed to create workflow graph: {str(e)}", exc_info=True)
+        raise
+
+
+def run_monitoring_workflow(
+    dag_id: str = None,
+    dag_run_id: str = None,
+    task_id: str = None,
+    session_id: str = None,
+    user_input: str = None,
+) -> AgentState:
+    """
+    Run the monitoring workflow synchronously
+
+    Args:
+        dag_id: Optional specific DAG to monitor
+        dag_run_id: Optional specific DAG run
+        task_id: Optional specific task
+        session_id: Optional session identifier
+        user_input: Optional user input for interaction
+
+    Returns:
+        Final workflow state
+    """
+    # Create initial state
+    initial_state = create_initial_state(
+        dag_id=dag_id, dag_run_id=dag_run_id, task_id=task_id, session_id=session_id
+    )
+
+    if user_input:
+        initial_state["user_input"] = user_input
+
+    # Create and run graph
+    app = create_monitoring_graph(session_id)
+
+    # Execute workflow
+    final_state = app.invoke(initial_state)
+
+    return final_state

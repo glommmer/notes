@@ -1,0 +1,28 @@
+# Core dependencies
+fastapi==0.115.11
+uvicorn==0.34.0
+streamlit==1.42.2
+python-dotenv==1.0.1
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# LangChain & LangGraph
+langchain==0.3.19
+langchain-openai==0.3.7
+langgraph==0.3.2
+langchain-core==0.3.28
+langchain-community==0.3.18
+
+# Observability
+langfuse==2.59.7
+
+# API clients
+httpx==0.28.1
+requests==2.32.3
+
+# Search tools
+duckduckgo-search==7.5.4
+
+# Utilities
+sseclient-py==1.8.0
+tiktoken==0.9.0
