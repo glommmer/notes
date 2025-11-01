@@ -3,6 +3,7 @@ LangGraph Workflow Definition - Orchestrates multi-agent workflow
 """
 
 import logging
+from pathlib import Path
 from typing import Literal
 from langgraph.graph import StateGraph, END
 from server.workflow.state import AgentState, create_initial_state
@@ -67,12 +68,16 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
 
             Returns:
                 "analyzer" if error found, "end" if no errors or already resolved
+
+            *Literal["analyzer", "end"]
+            - 이 함수는 정확하게 "analyzer" 또는 "end" 문자열만 반환할 수 있음을 타입 체커에게 전달
             """
             # Check if monitoring found an error
             if state.get("is_resolved"):
                 logger.info("No errors to analyze - workflow ending")
                 return "end"
 
+            # dag_id, task_id 모두 있는지 체크
             if not state.get("dag_id") or not state.get("task_id"):
                 logger.warning("No task identified for analysis - workflow ending")
                 return "end"
@@ -87,6 +92,7 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
             Returns:
                 "interaction" if analysis complete, "end" if failed
             """
+            # 분석 보고서 있는지 체크
             if not state.get("analysis_report"):
                 logger.warning("No analysis report available - workflow ending")
                 return "end"
@@ -103,6 +109,7 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
                 "interaction" if waiting for input
                 "end" if resolved
             """
+            # 오류 존재 여부 체크
             if state.get("is_resolved"):
                 logger.info("Issue already resolved - workflow ending")
                 return "end"
@@ -133,6 +140,7 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
                 "end" if resolved or no more actions needed
                 "interaction" if waiting for more user input
             """
+            # 오류 존재 여부 체크
             if state.get("is_resolved"):
                 logger.info("Workflow completed successfully")
                 return "end"
@@ -179,6 +187,22 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
         # Compile the graph
         logger.info("Compiling workflow graph...")
         app = workflow.compile()
+
+        # 그래프 이미지 생성
+        try:
+            # PNG 파일로 저장
+            graph_image = app.get_graph().draw_mermaid_png()
+
+            # 현재 파일과 동일한 경로에 저장
+            output_path = Path(__file__).parent / "workflow_graph.png"
+
+            with open(output_path, "wb") as f:
+                f.write(graph_image)
+
+            logger.info(f"✅ Workflow graph saved to: {output_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to generate graph image: {e}")
 
         logger.info("Workflow graph created and compiled successfully")
 

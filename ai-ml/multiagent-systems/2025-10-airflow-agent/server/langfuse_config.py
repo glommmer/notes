@@ -2,7 +2,8 @@
 Langfuse Configuration for LLM Observability
 """
 
-from langfuse.callback import CallbackHandler
+from langfuse.langchain import CallbackHandler
+from langfuse import Langfuse
 from server.config import settings
 import uuid
 import logging
@@ -31,16 +32,21 @@ def create_langfuse_handler(
         if session_id is None:
             session_id = str(uuid.uuid4())
 
-        handler = CallbackHandler(
-            public_key=settings.LANGFUSE_PUBLIC_KEY,
-            secret_key=settings.LANGFUSE_SECRET_KEY,
-            host=settings.LANGFUSE_HOST,
-            session_id=session_id,
-            user_id=user_id,
-            trace_name=trace_name or "airflow_monitoring_workflow",
-        )
+        # handler = CallbackHandler(
+        #     public_key=settings.LANGFUSE_PUBLIC_KEY,
+        #     secret_key=settings.LANGFUSE_SECRET_KEY,
+        #     host=settings.LANGFUSE_HOST,
+        #     session_id=session_id,
+        #     user_id=user_id,
+        #     trace_name=trace_name or "airflow_monitoring_workflow",
+        # )
+
+        handler = CallbackHandler()
 
         logger.info(f"Langfuse handler created successfully for session: {session_id}")
+        logger.info(f"   Session ID: {session_id}")
+        logger.info(f"   User ID: {user_id}")
+
         return handler
 
     except Exception as e:
@@ -61,7 +67,19 @@ def get_langfuse_config(session_id: Optional[str] = None) -> dict:
     """
     handler = create_langfuse_handler(session_id=session_id)
 
+    config = {
+        "run_name": "airflow_monitoring_agent",
+    }
+
+    # if handler:
+    #     return {"callbacks": [handler], "run_name": "airflow_monitoring_agent"}
+    # else:
+    #     return {"callbacks": [], "run_name": "airflow_monitoring_agent"}
+
     if handler:
-        return {"callbacks": [handler], "run_name": "airflow_monitoring_agent"}
-    else:
-        return {"callbacks": [], "run_name": "airflow_monitoring_agent"}
+        config["callbacks"] = [handler]
+        config["metadata"] = {
+            "langfuse_session_id": session_id,
+        }
+
+    return config

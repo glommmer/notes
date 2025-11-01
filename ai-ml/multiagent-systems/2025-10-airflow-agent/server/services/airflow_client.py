@@ -37,7 +37,7 @@ class AirflowClient:
         Initialize Airflow API client
 
         Args:
-            base_url: Airflow webserver URL
+            base_url: Airflow webserver(api-server) URL
             username: Basic auth username
             password: Basic auth password
             timeout: Request timeout in seconds
@@ -348,6 +348,13 @@ class AirflowClient:
 
 
 class AirflowAuthManager:
+    """
+    Airflow API 인증을 위한 JWT(Json Web Token) 관리자
+
+    - Airflow REST API 호출 시 필요한 JWT의 생성, 저장, 자동 갱신 담당
+    - 토큰 만료 5분 전에 자동으로 갱신하여 API 호출의 연속성 보장
+    """
+
     def __init__(self, base_url, username, password):
         self.base_url = base_url
         self.username = username
@@ -361,13 +368,15 @@ class AirflowAuthManager:
         response = requests.post(token_url, json=payload)
         access_token = response.json().get("access_token", None)
         if not access_token:
-            print(f"토큰 생성 실패: {response.status_code} - {response.text}")
+            print(
+                f"## Failed to create token: {response.status_code} - {response.text}"
+            )
             return None
         else:
             return access_token
 
     def get_valid_token(self):
-        """JWT 토큰을 가져오거나 갱신합니다."""
+        """JWT 토큰을 가져오거나 갱신"""
         current_time = time.time()
 
         # 토큰이 없거나 만료 5분 전이면 갱신
@@ -377,7 +386,7 @@ class AirflowAuthManager:
                 # JWT 토큰의 기본 만료 시간은 24시간 (86400초)
                 self._token_expiry = current_time + 86400
             else:
-                raise Exception("JWT 토큰 생성에 실패했습니다.")
+                raise Exception("## Failed to create JWT token")
 
         return self._token
 

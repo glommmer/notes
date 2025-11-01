@@ -39,20 +39,21 @@ class ErrorAnalyzerAgent:
 
         try:
             # Initialize LLM
-            # self.llm = ChatOpenAI(
-            #     model=settings.OPENAI_MODEL,
-            #     temperature=settings.OPENAI_TEMPERATURE,
-            #     api_key=settings.OPENAI_API_KEY
-            # )
-
-            self.llm = AzureChatOpenAI(
-                openai_api_key=settings.AZURE_OPENAI_API_KEY,
-                azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
-                azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT,
-                api_version=settings.AZURE_OPENAI_API_VERSION,
-                temperature=0.7,
-                # streaming=True,  # 스트리밍 활성화
+            self.llm = ChatOpenAI(
+                model=settings.OPENAI_MODEL,
+                temperature=settings.OPENAI_TEMPERATURE,
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL,
             )
+
+            # self.llm = AzureChatOpenAI(
+            #     openai_api_key=settings.AZURE_OPENAI_API_KEY,
+            #     azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            #     azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT,
+            #     api_version=settings.AZURE_OPENAI_API_VERSION,
+            #     temperature=0.7,
+            #     # streaming=True,  # 스트리밍 활성화
+            # )
 
             # Setup tools
             self.tools = [create_search_tool()]

@@ -28,20 +28,21 @@ class UserInteractionAgent:
         self.agent_type = AgentType.INTERACTION
 
         # Initialize LLM for generating user-friendly messages
-        # self.llm = ChatOpenAI(
-        #     model=settings.OPENAI_MODEL,
-        #     temperature=0.5,
-        #     api_key=settings.OPENAI_API_KEY
-        # )
-
-        self.llm = AzureChatOpenAI(
-            openai_api_key=settings.AZURE_OPENAI_API_KEY,
-            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
-            azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
+        self.llm = ChatOpenAI(
+            model=settings.OPENAI_MODEL,
             temperature=0.5,
-            # streaming=True,  # 스트리밍 활성화
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_BASE_URL,
         )
+
+        # self.llm = AzureChatOpenAI(
+        #     openai_api_key=settings.AZURE_OPENAI_API_KEY,
+        #     azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        #     azure_deployment=settings.AZURE_OPENAI_DEPLOYMENT,
+        #     api_version=settings.AZURE_OPENAI_API_VERSION,
+        #     temperature=0.5,
+        #     # streaming=True,  # 스트리밍 활성화
+        # )
 
     def __call__(self, state: AgentState) -> Dict[str, Any]:
         """
@@ -56,11 +57,13 @@ class UserInteractionAgent:
         logger.info("💬 UserInteractionAgent: Preparing user interaction...")
 
         # Check if we already have user input
+        # 사용자 입력이 이미 있으면 바로 처리
         if state.get("user_input"):
             logger.info("User input already provided, processing...")
             return self._process_user_input(state)
 
         # Generate question for user
+        # 첫 번째 질문 생성
         question = self._generate_user_question(state)
 
         return {

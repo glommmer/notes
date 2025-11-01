@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from server.workflow.graph import create_monitoring_graph
 from server.workflow.state import create_initial_state, AgentState
-from server.langfuse_config import create_langfuse_handler
+from server.langfuse_config import get_langfuse_config
 import uuid
 import traceback
 
@@ -42,14 +42,14 @@ class MonitoringResponse(BaseModel):
     data: Optional[dict] = None
 
 
-async def simple_event_generator(app, initial_state: AgentState, langfuse_handler):
+async def simple_event_generator(app, initial_state: AgentState, config: dict):
     """
     Simplified event generator using stream mode
 
     Args:
         app: Compiled LangGraph application
         initial_state: Initial workflow state
-        langfuse_handler: Langfuse callback handler
+        config: LangChain config with callbacks
 
     Yields:
         SSE formatted messages
@@ -69,7 +69,10 @@ async def simple_event_generator(app, initial_state: AgentState, langfuse_handle
         try:
             for output in app.stream(
                 initial_state,
-                config={"callbacks": [langfuse_handler], "recursion_limit": 100},
+                config={
+                    **config,
+                    "recursion_limit": 100,
+                },
                 stream_mode="updates",
             ):
                 if not output:
@@ -206,13 +209,12 @@ async def invoke_monitoring_workflow(request: MonitoringRequest):
         # Create workflow graph
         app = create_monitoring_graph(session_id)
 
-        # Create Langfuse handler
-        langfuse_handler = create_langfuse_handler(session_id=session_id)
+        # get_langfuse_config 사용
+        config = get_langfuse_config(session_id=session_id)
+        logger.info(f"Config: {config}")
 
         # Execute workflow
-        final_state = app.invoke(
-            initial_state, config={"callbacks": [langfuse_handler]}
-        )
+        final_state = app.invoke(initial_state, config=config)
 
         return MonitoringResponse(
             status="success", message="Workflow completed", data=final_state
@@ -241,7 +243,7 @@ async def stream_monitoring_workflow(request: MonitoringRequest):
         StreamingResponse with SSE
     """
     try:
-        logger.info(f"Starting workflow stream for request: {request.dict()}")
+        logger.info(f"Starting workflow stream for request: {request.model_dump()}")
 
         # Generate session ID if not provided
         session_id = request.session_id or str(uuid.uuid4())
@@ -274,16 +276,16 @@ async def stream_monitoring_workflow(request: MonitoringRequest):
 
         # Create Langfuse handler
         try:
-            langfuse_handler = create_langfuse_handler(session_id=session_id)
-            logger.info("Langfuse handler created")
-        except Exception as langfuse_error:
-            logger.warning(f"Langfuse handler creation failed: {str(langfuse_error)}")
-            # Use empty callback list if Langfuse fails
-            langfuse_handler = None
+            config = get_langfuse_config(session_id=session_id)
+            logger.info("Langfuse config created successfully")
+        except Exception as config_error:
+            logger.warning(f"Config creation failed: {str(config_error)}")
+            # Fallback: 빈 config 사용
+            config = {"run_name": "airflow_monitoring_agent"}
 
         # Return streaming response
         return StreamingResponse(
-            simple_event_generator(app, initial_state, langfuse_handler),
+            simple_event_generator(app, initial_state, config),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -314,10 +316,18 @@ async def health_check():
         # Try to create a workflow graph to verify everything is working
         test_graph = create_monitoring_graph("health_check")
 
+        try:
+            config = get_langfuse_config(session_id="health_check")
+            langfuse_status = "ok" if config.get("callbacks") else "fallback"
+        except Exception as e:
+            logger.warning(f"Langfuse health check failed: {e}")
+            langfuse_status = "failed"
+
         return {
             "status": "healthy",
             "service": "airflow-monitoring-agent",
             "graph_status": "ok",
+            "langfuse_status": langfuse_status,
         }
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")

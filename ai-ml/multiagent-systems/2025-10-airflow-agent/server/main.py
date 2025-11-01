@@ -21,17 +21,19 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Multi-agent system for monitoring and troubleshooting Apache Airflow",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs",  # Swagger UI 문서 접근 경로
+    redoc_url="/redoc",  # 대안 문서 형식 경로
 )
 
 # Add CORS middleware
+# CORS: Cross-Origin Resource Sharing; 다른 도메인에서 API 호출을 허용하는 보안 정책
+# 미들웨어: 모든 요청/응답을 가로채서 전처리
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, specify actual origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,  # 쿠키, 인증 헤더 포함 요청 허용 (JWT 토큰, 세션 쿠키 등)
+    allow_methods=["*"],  # 모든 HTTP 메서드 허용 (GET, POST, PUT, DELETE 등)
+    allow_headers=["*"],  # 모든 HTTP 헤더 허용 (Authorization, Content-Type 등)
 )
 
 # Include routers

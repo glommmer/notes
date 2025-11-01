@@ -54,16 +54,27 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 
 class CustomSSEClient:
-    """Custom SSE client for requests.Response objects"""
+    """
+    Custom SSE client for requests.Response objects
+
+    FastAPI에서 보낸 Server-Sent Events(SSE)를 파싱하는 클라이언트
+    - FastAPI 서버 (SSE 스트림 전송)
+      → requests.Response (HTTP 응답 스트림)
+      → CustomSSEClient (SSE 형식 파싱)
+
+    *SSE 포맷 예시
+    - data: {"type": "start", "message": "🚀 워크플로우 시작..."}
+    - data: {"type": "agent_update", "agent": "MONITOR", "message": "🔍 Airflow 모니터링 중..."}
+    """
 
     def __init__(self, response):
-        self.response = response
+        self.response = response  # HTTP 응답 객체 (requests.Reponse)
         self.logger = logging.getLogger("streamlit_debug")
 
     def events(self):
         """Generator that yields SSE events"""
-        buffer = ""
-        event_data = {}
+        buffer = ""  # 버퍼: 읽은 데이터 임시 저장
+        event_data = {}  # 현재 파싱 중인 이벤트 정보
 
         for chunk in self.response.iter_content(chunk_size=None, decode_unicode=True):
             if not chunk:
@@ -72,6 +83,7 @@ class CustomSSEClient:
             buffer += chunk
 
             while "\n" in buffer:
+                # buffer의 첫 번째 줄을 추출하고 나머지는 buffer에 유지
                 line, buffer = buffer.split("\n", 1)
                 line = line.rstrip()
 
@@ -82,12 +94,16 @@ class CustomSSEClient:
                     event_data = {}
                     continue
 
+                # <예시> 'data: {"type": "start"}' → '{"type": "start"}'
                 if line.startswith("data:"):
                     event_data["data"] = event_data.get("data", "") + line[5:].lstrip()
+                # <예시> "event: new_message" → "new_message"
                 elif line.startswith("event:"):
                     event_data["event"] = line[6:].lstrip()
+                # <예시> "id: 1234" → "12345"
                 elif line.startswith("id:"):
                     event_data["id"] = line[3:].lstrip()
+                # <예시> "retry: 5000" → 5000
                 elif line.startswith("retry:"):
                     event_data["retry"] = int(line[6:].lstrip())
 
