@@ -62,9 +62,22 @@ class UserInteractionAgent:
             logger.info("User input already provided, processing...")
             return self._process_user_input(state)
 
+        if state.get("requires_user_input") and state.get("user_question"):
+            logger.info("Already waiting for user input - no change")
+            return {
+                "current_agent": self.agent_type.value,  # 다른 필드 반환 안 함 (상태 유지)
+            }
+
         # Generate question for user
         # 첫 번째 질문 생성
         question = self._generate_user_question(state)
+
+        # if not state.get("requires_user_input"):
+        #     return {
+        #         "user_question": question,
+        #         "requires_user_input": True,  # ← 처음만!
+        #         "current_agent": self.agent_type.value,
+        #     }
 
         return {
             "user_question": question,

@@ -7,11 +7,13 @@ import os
 import streamlit as st
 import requests
 import logging
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from sseclient import SSEClient
 from typing import Optional
 from app.utils.state_manager import add_message, get_messages
+from websockets import connect
 
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs" / "streamlit"
@@ -512,3 +514,89 @@ def analyze_specific_task(dag_id: str, dag_run_id: str, task_id: str):
             dag_id=dag_id, dag_run_id=dag_run_id, task_id=task_id, session_id=session_id
         ):
             process_workflow_event(event, in_sidebar=True)
+
+
+async def websocket_workflow(
+    dag_id: str = None, dag_run_id: str = None, task_id: str = None
+):
+    """
+    WebSocket을 통한 워크플로우 실행
+
+    Args:
+        dag_id: DAG ID
+        dag_run_id: DAG Run ID
+        task_id: Task ID
+    """
+    uri = "ws://localhost:8000/ws/agent"
+
+    async with connect(uri) as websocket:
+        logger.info("✅ WebSocket connected")
+
+        # 시작 메시지 전송
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "start",
+                    "dag_id": dag_id,
+                    "dag_run_id": dag_run_id,
+                    "task_id": task_id,
+                }
+            )
+        )
+
+        # 서버 응답 수신
+        while True:
+            try:
+                message = await websocket.recv()
+                data = json.loads(message)
+
+                event_type = data.get("type")
+
+                if event_type == "start":
+                    st.info(data.get("message"))
+
+                elif event_type == "agent_update":
+                    agent = data.get("agent")
+                    msg = data.get("message")
+                    st.write(f"**{agent}**: {msg}")
+
+                    # 상세 데이터 표시
+                    if data.get("data"):
+                        with st.expander("상세 정보"):
+                            st.json(data["data"])
+
+                elif event_type == "requires_input":
+                    # 사용자 입력 요청
+                    question = data.get("question")
+                    st.warning(question)
+
+                    user_choice = st.radio(
+                        "선택하세요:",
+                        ["Clear Task", "Skip", "Manual"],
+                        key=f"choice_{data.get('session_id')}",
+                    )
+
+                    if st.button("전송", key=f"send_{data.get('session_id')}"):
+                        # 사용자 입력 전송
+                        await websocket.send(
+                            json.dumps({"type": "user_input", "input": user_choice})
+                        )
+
+                elif event_type == "complete":
+                    st.success(data.get("message"))
+                    st.balloons()
+                    break
+
+                elif event_type == "error":
+                    st.error(f"오류: {data.get('message')}")
+                    break
+
+            except Exception as e:
+                logger.error(f"Error: {e}")
+                break
+
+
+# Streamlit UI에서 호출
+def start_websocket_workflow(dag_id: str = None):
+    """워크플로우 시작"""
+    asyncio.run(websocket_workflow(dag_id=dag_id))

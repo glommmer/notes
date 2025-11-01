@@ -114,20 +114,37 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
                 logger.info("Issue already resolved - workflow ending")
                 return "end"
 
-            # Check if we're waiting for user input
-            if state.get("requires_user_input") and not state.get("user_input"):
-                logger.info("Waiting for user input - staying in interaction")
-                return "interaction"
+            iteration_count = state.get("iteration_count", 0)
+            max_iterations = state.get("max_iterations", 20)
+
+            if iteration_count >= max_iterations:
+                logger.warning(f"⏱️ Max iterations {max_iterations} reached - ending workflow")
+                return "end"
+
+            if state.get("requires_user_input"):
+                if state.get("user_input"):
+                    # 입력이 있으면 interaction 처리
+                    logger.info("💬 Processing user input")
+                    return "action"
+                else:
+                    # 입력이 대기 중이면 END로 종료
+                    logger.info(f"⏳ Iteration {iteration_count}: Waiting for user input...")
+                    return "end"
+
+            # # Check if we're waiting for user input
+            # if state.get("requires_user_input") and not state.get("user_input"):
+            #     logger.info("Waiting for user input - staying in interaction")
+            #     return "interaction"
 
             # Check if we have a decision
             if state.get("final_action"):
                 logger.info("Proceeding to action execution")
                 return "action"
 
-            # Process user input if available
-            if state.get("user_input"):
-                logger.info("Processing user input")
-                return "interaction"
+            # # Process user input if available
+            # if state.get("user_input"):
+            #     logger.info("Processing user input")
+            #     return "interaction"
 
             logger.warning("No clear path forward - workflow ending")
             return "end"

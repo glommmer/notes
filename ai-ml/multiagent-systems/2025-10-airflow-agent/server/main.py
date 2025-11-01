@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from server.config import settings
 from server.routers import agent_router
+from server.routers.websocket_router import ws_router
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +39,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(agent_router)
+app.include_router(ws_router)
 
 
 @app.on_event("startup")
@@ -46,6 +48,7 @@ async def startup_event():
     logger.info(f"Starting {settings.PROJECT_NAME}")
     logger.info(f"Airflow Host: {settings.AIRFLOW_HOST}")
     logger.info(f"Debug Mode: {settings.DEBUG}")
+    logger.info("✅ WebSocket endpoint available at: ws://localhost:8000/ws/agent")
 
 
 @app.on_event("shutdown")
@@ -62,6 +65,7 @@ async def root():
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/api/v1/agent/health",
+        "websocket": "ws://localhost:8000/ws/agent",
     }
 
 
