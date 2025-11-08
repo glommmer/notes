@@ -268,17 +268,17 @@ class AirflowClient:
         )
         return log_content
 
-    def get_dag_source(self, file_token: str) -> str:
+    def get_dag_source(self, dag_id: str) -> str:
         """
         Get DAG source code
 
         Args:
-            file_token: File token from DAG details
+            dag_id: DAG ID
 
         Returns:
             DAG source code as string
         """
-        endpoint = f"/dagSources/{file_token}"
+        endpoint = f"/dagSources/{dag_id}"
 
         result = self._make_request("GET", endpoint)
         source_code = result.get("content", "")

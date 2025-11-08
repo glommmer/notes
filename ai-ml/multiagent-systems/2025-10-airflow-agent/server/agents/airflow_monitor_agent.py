@@ -63,6 +63,14 @@ class AirflowMonitorAgent:
         logger.info("🔍 AirflowMonitorAgent: Starting monitoring...")
 
         try:
+            # 이미 분석이 완료된 상태인지 확인
+            if state.get("analysis_report") and state.get("user_input"):
+                logger.info("⏭️ Analysis already done - skipping monitor")
+                return {
+                    "current_agent": self.agent_type.value,
+                    # 기존 상태 유지 (분석 결과, DAG 정보 등)
+                }
+
             # 1. user_input 분석 추가
             user_input = state.get("user_input", "").strip()
 
@@ -109,14 +117,15 @@ class AirflowMonitorAgent:
         User Request: "{user_input}"
         
         Extract the following (return JSON only):
-        - dag_id: The DAG identifier (e.g., "success_dag", "failed_dag")
+        - dag_id: The DAG identifier (e.g., "success_dag", "failed_dag", "~")
         - date: Date in YYYY-MM-DD format if mentioned (e.g., "2025년 11월 7일" -> "2025-11-07")
-        - task_id: Task identifier if mentioned
+        - task_id: Task identifier if mentioned (e.g., "failed_dag.task_group_2.task_2_fails", "~")
         - action: What user wants (e.g., "check_status", "analyze", "clear")
         
         Examples:
         - "success_dag 상태 확인" -> {{"dag_id": "success_dag", "action": "check_status"}}
         - "failed_dag의 2025년 11월 7일 작업" -> {{"dag_id": "failed_dag", "date": "2025-11-07"}}
+        - "모든 dag 상태 확인" -> {{"dag_id": "~", "date": "~", "task_id": "~"}}
         
         Return valid JSON only, no explanation.
         """
@@ -169,6 +178,7 @@ class AirflowMonitorAgent:
             for run in dag_runs.get("dag_runs"):  # Check last 3 runs
                 run_id = run.get("dag_run_id")
                 run_state = run.get("state")
+                dag_id = run.get("dag_id") or dag_id
 
                 logger.info(f"Checking run: {run_id}, state: {run_state}")
 

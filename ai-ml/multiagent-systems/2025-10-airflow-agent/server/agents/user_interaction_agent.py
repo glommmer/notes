@@ -205,40 +205,78 @@ Run: {dag_run_id}
 
         logger.info(f"Processing user input: {user_input}")
 
-        # Parse user decision
-        if any(
-            keyword in user_input
-            for keyword in ["재실행", "clear", "retry", "다시", "1"]
-        ):
-            final_action = "CLEAR_TASK"
-            action_message = "✅ Task를 Clear하여 재실행하겠습니다."
-            requires_more_input = False
+        # 명확한 액션 매핑
+        action_map = {
+            "재시작": "CLEAR_TASK",
+            "clear": "CLEAR_TASK",
+            "retry": "CLEAR_TASK",
+            "실행": "CLEAR_TASK",
+            "1": "CLEAR_TASK",
 
-        elif any(
-            keyword in user_input
-            for keyword in ["수동", "manual", "직접", "2", "건너뛰", "skip"]
-        ):
-            final_action = "SKIP"
-            action_message = "⏭️  수동 처리를 위해 건너뜁니다."
-            requires_more_input = False
+            "수동": "SKIP",
+            "manual": "SKIP",
+            "나중": "SKIP",
+            "skip": "SKIP",
+            "2": "SKIP",
 
-        elif any(
-            keyword in user_input
-            for keyword in ["보고서", "분석", "report", "3", "확인"]
-        ):
+            "상세": "SHOW_REPORT",
+            "보고서": "SHOW_REPORT",
+            "report": "SHOW_REPORT",
+            "3": "SHOW_REPORT",
+        }
+
+        # Find matching action
+        final_action = None
+        for keyword, action in action_map.items():
+            if keyword in user_input:
+                final_action = action
+                break
+
+        if not final_action:
+            # 기본값: 보고서 표시
             final_action = "SHOW_REPORT"
-            action_message = "📄 전체 분석 보고서를 표시합니다."
-            requires_more_input = True
 
-        else:
-            # Default: treat as request for more info
-            final_action = "SHOW_REPORT"
-            action_message = "📄 입력을 이해하지 못했습니다. 전체 보고서를 표시합니다."
-            requires_more_input = True
+        # # Parse user decision
+        # if any(
+        #     keyword in user_input
+        #     for keyword in ["재실행", "clear", "retry", "다시", "1"]
+        # ):
+        #     final_action = "CLEAR_TASK"
+        #     action_message = "✅ Task를 Clear하여 재실행하겠습니다."
+        #     requires_more_input = False
+        #
+        # elif any(
+        #     keyword in user_input
+        #     for keyword in ["수동", "manual", "직접", "2", "건너뛰", "skip"]
+        # ):
+        #     final_action = "SKIP"
+        #     action_message = "⏭️  수동 처리를 위해 건너뜁니다."
+        #     requires_more_input = False
+        #
+        # elif any(
+        #     keyword in user_input
+        #     for keyword in ["보고서", "분석", "report", "3", "확인"]
+        # ):
+        #     final_action = "SHOW_REPORT"
+        #     action_message = "📄 전체 분석 보고서를 표시합니다."
+        #     requires_more_input = True
+        #
+        # else:
+        #     # Default: treat as request for more info
+        #     final_action = "SHOW_REPORT"
+        #     action_message = "📄 입력을 이해하지 못했습니다. 전체 보고서를 표시합니다."
+        #     requires_more_input = True
+
+        # return {
+        #     "final_action": final_action,
+        #     "action_result": action_message,
+        #     "requires_user_input": requires_more_input,
+        #     "current_agent": self.agent_type.value,
+        # }
 
         return {
             "final_action": final_action,
-            "action_result": action_message,
-            "requires_user_input": requires_more_input,
+            "action_result": f"선택된 액션: {final_action}",
+            "requires_user_input": False,
             "current_agent": self.agent_type.value,
         }

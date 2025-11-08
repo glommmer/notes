@@ -62,7 +62,7 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
         logger.info("Nodes added to workflow")
 
         # Define conditional routing functions
-        def should_analyze(state: AgentState) -> Literal["analyzer", "end"]:
+        def should_analyze(state: AgentState) -> Literal["analyzer", "interaction", "end"]:
             """
             Decide whether to proceed to analysis
 
@@ -72,6 +72,11 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
             *Literal["analyzer", "end"]
             - 이 함수는 정확하게 "analyzer" 또는 "end" 문자열만 반환할 수 있음을 타입 체커에게 전달
             """
+            # 이미 분석이 완료되었고 user_input이 있으면 interaction으로 바로 이동
+            if state.get("analysis_report") and state.get("user_input"):
+                logger.info("⏭️ Analysis already complete - skipping to interaction")
+                return "interaction"
+
             # Check if monitoring found an error
             if state.get("is_resolved"):
                 logger.info("No errors to analyze - workflow ending")
@@ -184,7 +189,11 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
 
         # Add edges with conditional routing
         workflow.add_conditional_edges(
-            "monitor", should_analyze, {"analyzer": "analyzer", "end": END}
+            "monitor", should_analyze, {
+                "analyzer": "analyzer",
+                "interaction": "interaction",
+                "end": END,
+            }
         )
 
         workflow.add_conditional_edges(

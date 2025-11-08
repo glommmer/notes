@@ -181,7 +181,7 @@ class ErrorAnalyzerAgent:
                 dag_details = self.client.get_dag_details(dag_id)
                 file_token = dag_details.get("file_token")
                 if file_token:
-                    dag_source = self.client.get_dag_source(file_token)
+                    dag_source = self.client.get_dag_source(dag_id)
                     logger.info(
                         f"Retrieved {len(dag_source)} characters of source code"
                     )

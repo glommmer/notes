@@ -425,55 +425,56 @@ async def state_aware_event_generator(
         seen_nodes = set()
         current_state = initial_state
 
-        # user_input이 있고 이미 분석이 완료된 상태라면 interaction부터 시작
-        if current_state.get("user_input") and current_state.get("analysis_report"):
-            logger.info("Resuming from interaction node")
+        # # user_input이 있고 이미 분석이 완료된 상태라면 interaction부터 시작
+        # if current_state.get("user_input") and current_state.get("analysis_report"):
+        #     logger.info("Resuming from interaction node")
 
-            # interaction 노드부터 실행
-            for output in app.stream(
-                current_state,
-                config={**config, "recursion_limit": 100},
-                stream_mode="updates",
-            ):
-                if not output:
+        # interaction 노드부터 실행
+        for output in app.stream(
+            current_state,
+            config={**config, "recursion_limit": 100},
+            stream_mode="updates",
+        ):
+            if not output:
+                continue
+
+            for node_name, node_output in output.items():
+                if node_name in seen_nodes:
                     continue
 
-                for node_name, node_output in output.items():
-                    if node_name in seen_nodes:
-                        continue
+                seen_nodes.add(node_name)
+                current_state.update(node_output)
 
-                    seen_nodes.add(node_name)
-                    current_state.update(node_output)
+                # Send event
+                event_data = create_event_data(node_name, node_output)
+                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.05)
 
-                    # Send event
-                    event_data = create_event_data(node_name, node_output)
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.05)
+                # ✅ 상태 저장
+                save_session_state(session_id, current_state)
 
-                    # ✅ 상태 저장
-                    save_session_state(session_id, current_state)
-        else:
-            # 처음부터 실행
-            for output in app.stream(
-                current_state,
-                config={**config, "recursion_limit": 100},
-                stream_mode="updates",
-            ):
-                if not output:
-                    continue
-
-                for node_name, node_output in output.items():
-                    if node_name in seen_nodes:
-                        continue
-
-                    seen_nodes.add(node_name)
-                    current_state.update(node_output)
-
-                    event_data = create_event_data(node_name, node_output)
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.05)
-
-                    save_session_state(session_id, current_state)
+        # else:
+        #     # 처음부터 실행
+        #     for output in app.stream(
+        #         current_state,
+        #         config={**config, "recursion_limit": 100},
+        #         stream_mode="updates",
+        #     ):
+        #         if not output:
+        #             continue
+        #
+        #         for node_name, node_output in output.items():
+        #             if node_name in seen_nodes:
+        #                 continue
+        #
+        #             seen_nodes.add(node_name)
+        #             current_state.update(node_output)
+        #
+        #             event_data = create_event_data(node_name, node_output)
+        #             yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+        #             await asyncio.sleep(0.05)
+        #
+        #             save_session_state(session_id, current_state)
 
         # Send completion
         completion_event = {"type": "complete", "message": "✅ 워크플로우 완료"}
