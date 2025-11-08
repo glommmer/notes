@@ -64,16 +64,25 @@ session_manager = SessionManager()
 class CustomSSEClient:
     """
     Custom SSE client for requests.Response objects
+
+    FastAPI에서 보낸 Server-Sent Events(SSE)를 파싱하는 클라이언트
+    - FastAPI 서버 (SSE 스트림 전송)
+      → requests.Response (HTTP 응답 스트림)
+      → CustomSSEClient (SSE 형식 파싱)
+
+    *SSE 포맷 예시
+    - data: {"type": "start", "message": "🚀 워크플로우 시작..."}
+    - data: {"type": "agent_update", "agent": "MONITOR", "message": "🔍 Airflow 모니터링 중..."}
     """
 
     def __init__(self, response):
-        self.response = response
+        self.response = response  # HTTP 응답 객체 (requests.Reponse)
         self.logger = logging.getLogger("streamlit_debug")
 
     def events(self):
         """Generator that yields SSE events"""
-        buffer = ""
-        event_data = {}
+        buffer = ""  # 버퍼: 읽은 데이터 임시 저장
+        event_data = {}  # 현재 파싱 중인 이벤트 정보
 
         for chunk in self.response.iter_content(chunk_size=None, decode_unicode=True):
             if not chunk:
@@ -82,21 +91,27 @@ class CustomSSEClient:
             buffer += chunk
 
             while "\n" in buffer:
+                # buffer의 첫 번째 줄을 추출하고 나머지는 buffer에 유지
                 line, buffer = buffer.split("\n", 1)
                 line = line.rstrip()
 
                 if not line:
+                    # 빈 줄은 이벤트 종료 신호
                     if event_data.get("data"):
                         yield type("Event", (), event_data)()
                     event_data = {}
                     continue
 
+                # <예시> 'data: {"type": "start"}' → '{"type": "start"}'
                 if line.startswith("data:"):
                     event_data["data"] = event_data.get("data", "") + line[5:].lstrip()
+                # <예시> "event: new_message" → "new_message"
                 elif line.startswith("event:"):
                     event_data["event"] = line[6:].lstrip()
+                # <예시> "id: 1234" → "12345"
                 elif line.startswith("id:"):
                     event_data["id"] = line[3:].lstrip()
+                # <예시> "retry: 5000" → 5000
                 elif line.startswith("retry:"):
                     event_data["retry"] = int(line[6:].lstrip())
 
@@ -177,7 +192,10 @@ def stream_workflow_updates(
         )
 
         logger.info(f"Response type: {type(response)}")
+        logger.info(f"Response class: {response.__class__.__name__}")
         logger.info(f"Status code: {response.status_code}")
+        logger.info(f"Response headers: {dict(response.headers)}")
+        logger.info(f"Response encoding: {response.encoding}")
 
         if response.status_code != 200:
             yield {
@@ -190,7 +208,7 @@ def stream_workflow_updates(
         logger.info("Initializing SSEClient...")
         try:
             client = CustomSSEClient(response)
-            logger.info(f"SSEClient created successfully")
+            logger.info(f"SSEClient created successfully: {type(client)}")
         except Exception as sse_error:
             logger.error(f"Failed to create SSEClient: {sse_error}", exc_info=True)
             yield {
@@ -205,9 +223,11 @@ def stream_workflow_updates(
         for event in client.events():
             event_count += 1
             logger.info(f"Event #{event_count} received")
+            logger.debug(f"Event type: {type(event)}")
+            logger.debug(f"Event attributes: {dir(event)}")
 
             if event.data:
-                logger.debug(f"Event data (raw): {event.data[:500]}...")
+                logger.debug(f"Event data (raw): {event.data[:500]}...")  # 처음 500자만
 
                 try:
                     data = json.loads(event.data)
@@ -227,10 +247,13 @@ def stream_workflow_updates(
     except requests.RequestException as e:
         error_msg = f"Request failed: {str(e)}"
         logger.error(error_msg, exc_info=True)
+        logger.error(f"Request URL: {url}")
+        logger.error(f"Request payload: {payload}")
         yield {"type": "error", "message": error_msg}
     except Exception as e:
         error_msg = f"Streaming error: {str(e)}"
         logger.error(error_msg, exc_info=True)
+        logger.error(f"Exception type: {type(e)}")
         yield {"type": "error", "message": error_msg}
 
 
@@ -274,7 +297,14 @@ def get_session_workspace(session_id: str) -> Dict[str, Any]:
 def render_agent_message(
     agent: str, message: str, data: dict = None, container=None, is_user_request=False
 ):
-    """Render an agent message in the chat interface"""
+    """
+    Render an agent message in the chat interface
+
+    Args:
+        agent: Agent name
+        message: Message text
+        data: Optional additional data
+    """
     if is_user_request:
         with st.container(border=True):
             st.markdown(f"### 👤 **사용자 요청**")
@@ -282,6 +312,7 @@ def render_agent_message(
             st.divider()
         return
 
+    # Map agent to avatar emoji
     avatar_map = {
         "MONITOR": "🔍",
         "ANALYZER": "🔬",
