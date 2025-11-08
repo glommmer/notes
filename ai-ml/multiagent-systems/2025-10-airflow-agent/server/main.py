@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from server.config import settings
 from server.routers import agent_router
 from server.routers.websocket_router import ws_router
+from server.langfuse_config import initialize_langfuse, shutdown_langfuse
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +47,10 @@ app.include_router(ws_router)
 async def startup_event():
     """Run on application startup"""
     logger.info(f"Starting {settings.PROJECT_NAME}")
+
+    # Initialize Langfuse
+    initialize_langfuse()
+
     logger.info(f"Airflow Host: {settings.AIRFLOW_HOST}")
     logger.info(f"Debug Mode: {settings.DEBUG}")
     logger.info("✅ WebSocket endpoint available at: ws://localhost:8000/ws/agent")
@@ -55,6 +60,9 @@ async def startup_event():
 async def shutdown_event():
     """Run on application shutdown"""
     logger.info(f"Shutting down {settings.PROJECT_NAME}")
+
+    # Shutdown Langfuse (flush remaining events)
+    shutdown_langfuse()
 
 
 @app.get("/")

@@ -3,7 +3,7 @@ Langfuse Configuration for LLM Observability
 """
 
 from langfuse.langchain import CallbackHandler
-from langfuse import Langfuse
+from langfuse import Langfuse, get_client
 from server.config import settings
 import uuid
 import logging
@@ -12,74 +12,131 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def create_langfuse_handler(
+def initialize_langfuse() -> Optional[Langfuse]:
+    """
+    Initialize Langfuse client at startup (singleton pattern)
+
+    Returns:
+        Langfuse client instance or None if initialization fails
+    """
+    try:
+        # ✅ 환경 변수 또는 생성자로 초기화
+        langfuse = Langfuse(
+            public_key=settings.LANGFUSE_PUBLIC_KEY,
+            secret_key=settings.LANGFUSE_SECRET_KEY,
+            host=settings.LANGFUSE_HOST,
+        )
+        logger.info("✅ Langfuse client initialized successfully")
+        return langfuse
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Langfuse client: {e}", exc_info=True)
+        return None
+
+
+def get_langfuse_handler(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
-    trace_name: Optional[str] = None,
+    tags: Optional[list] = None,
 ) -> Optional[CallbackHandler]:
     """
-    Create a Langfuse callback handler for tracing LLM interactions
+    Create Langfuse CallbackHandler for LangChain tracing
+
+    The CallbackHandler automatically uses environment variables:
+    - LANGFUSE_PUBLIC_KEY
+    - LANGFUSE_SECRET_KEY
+    - LANGFUSE_BASE_URL
 
     Args:
         session_id: Optional session identifier
         user_id: Optional user identifier
-        trace_name: Optional name for the trace
+        tags: Optional list of tags
 
     Returns:
-        CallbackHandler instance configured with project settings, or None if failed
+        CallbackHandler instance or None if creation fails
     """
     try:
-        if session_id is None:
-            session_id = str(uuid.uuid4())
+        # ✅ CallbackHandler는 환경 변수에서 자동으로 credentials를 읽음
+        # 추가 파라미터 없이 초기화 가능
+        langfuse_handler = CallbackHandler()
 
-        # handler = CallbackHandler(
-        #     public_key=settings.LANGFUSE_PUBLIC_KEY,
-        #     secret_key=settings.LANGFUSE_SECRET_KEY,
-        #     host=settings.LANGFUSE_HOST,
-        #     session_id=session_id,
-        #     user_id=user_id,
-        #     trace_name=trace_name or "airflow_monitoring_workflow",
-        # )
+        logger.info(f"✅ Langfuse CallbackHandler created successfully")
 
-        handler = CallbackHandler()
+        if session_id or user_id or tags:
+            logger.info(f"Session: {session_id}, User: {user_id}, Tags: {tags}")
 
-        logger.info(f"Langfuse handler created successfully for session: {session_id}")
-        logger.info(f"   Session ID: {session_id}")
-        logger.info(f"   User ID: {user_id}")
-
-        return handler
+        return langfuse_handler
 
     except Exception as e:
-        logger.warning(f"Failed to create Langfuse handler: {str(e)}")
-        logger.warning("Continuing without Langfuse tracing...")
+        logger.error(f"❌ Failed to create Langfuse handler: {e}", exc_info=True)
         return None
 
 
-def get_langfuse_config(session_id: Optional[str] = None) -> dict:
+def get_langfuse_config(
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    tags: Optional[list] = None,
+) -> dict:
     """
-    Get configuration dict for LangChain callbacks
+    Create LangChain config with Langfuse tracing
 
     Args:
-        session_id: Optional session identifier
+        session_id: Session identifier
+        user_id: User identifier
+        tags: List of tags
 
     Returns:
-        Configuration dictionary with Langfuse handler if available
+        Config dictionary for LangChain with Langfuse callbacks
     """
-    handler = create_langfuse_handler(session_id=session_id)
+    try:
+        handler = get_langfuse_handler(session_id, user_id, tags)
 
-    config = {
-        "run_name": "airflow_monitoring_agent",
-    }
+        if handler is None:
+            logger.warning("⚠️ Langfuse handler not available - using fallback config")
+            return {"run_name": "airflow_monitoring_agent"}
 
-    # if handler:
-    #     return {"callbacks": [handler], "run_name": "airflow_monitoring_agent"}
-    # else:
-    #     return {"callbacks": [], "run_name": "airflow_monitoring_agent"}
+        # metadata를 통해 trace 속성 설정
+        metadata = {}
+        if user_id:
+            metadata["langfuse_user_id"] = user_id
+        if session_id:
+            metadata["langfuse_session_id"] = session_id
+        if tags:
+            metadata["langfuse_tags"] = tags
 
-    if handler:
-        config["callbacks"] = [handler]
-        config["metadata"] = {
-            "langfuse_session_id": session_id,
+        config = {
+            "callbacks": [handler],
+            "run_name": "airflow_monitoring_agent",
         }
 
-    return config
+        if metadata:
+            config["metadata"] = metadata
+
+        logger.info(f"✅ Langfuse config created with metadata: {metadata}")
+
+        return config
+
+    except Exception as e:
+        logger.error(f"❌ Failed to create Langfuse config: {e}", exc_info=True)
+        return {"run_name": "airflow_monitoring_agent"}
+
+
+def flush_langfuse():
+    """Flush all pending Langfuse events (for short-lived apps)"""
+    try:
+        client = get_client()
+        if client:
+            client.flush()
+            logger.info("✅ Langfuse events flushed")
+    except Exception as e:
+        logger.error(f"❌ Failed to flush Langfuse: {e}")
+
+
+def shutdown_langfuse():
+    """Shutdown Langfuse client (for short-lived apps)"""
+    try:
+        client = get_client()
+        if client:
+            client.shutdown()
+            logger.info("✅ Langfuse client shut down")
+    except Exception as e:
+        logger.error(f"❌ Failed to shutdown Langfuse: {e}")

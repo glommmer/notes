@@ -240,5 +240,6 @@ Airflow API 호출 중 오류가 발생했습니다:
             "action_result": message,
             "requires_user_input": True,  # Ask again after showing report
             "user_question": "어떤 액션을 수행하시겠습니까?",
+            "is_resolved": False,
             "current_agent": self.agent_type.value,
         }

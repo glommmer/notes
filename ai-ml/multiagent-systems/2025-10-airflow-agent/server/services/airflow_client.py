@@ -127,7 +127,9 @@ class AirflowClient:
         logger.info(f"Found {len(dag_runs)} failed DAG runs")
         return dag_runs
 
-    def get_dag_run(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
+    def get_dag_run(
+        self, dag_id: str, dag_run_id: str, limit: int = 10, start_date_gte: str = None
+    ) -> Dict[str, Any]:
         """
         Get specific DAG run details
 
@@ -138,8 +140,35 @@ class AirflowClient:
         Returns:
             DAG run details
         """
+
         endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}"
-        return self._make_request("GET", endpoint)
+        params = {"limit": limit}
+
+        if start_date_gte:
+            params["start_date"] = start_date_gte
+
+        return self._make_request("GET", endpoint, params=params)
+
+    def get_dag_runs(
+        self, dag_id: str, limit: int = 10, start_date_gte: str = None
+    ) -> Dict[str, Any]:
+        """
+        Get specific DAG run details
+
+        Args:
+            dag_id: DAG identifier
+
+        Returns:
+            DAG run details
+        """
+
+        endpoint = f"/dags/{dag_id}/dagRuns"
+        params = {"limit": limit}
+
+        if start_date_gte:
+            params["start_date"] = start_date_gte
+
+        return self._make_request("GET", endpoint, params=params)
 
     def get_failed_task_instances(
         self, dag_id: str, dag_run_id: str
@@ -181,6 +210,20 @@ class AirflowClient:
             Task instance details
         """
         endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
+        return self._make_request("GET", endpoint)
+
+    def get_task_instances(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
+        """
+        Get specific task instance details
+
+        Args:
+            dag_id: DAG identifier
+            dag_run_id: DAG run identifier
+
+        Returns:
+            Task instance details
+        """
+        endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances"
         return self._make_request("GET", endpoint)
 
     def get_task_log(

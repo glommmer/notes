@@ -212,6 +212,7 @@ Run: {dag_run_id}
         ):
             final_action = "CLEAR_TASK"
             action_message = "✅ Task를 Clear하여 재실행하겠습니다."
+            requires_more_input = False
 
         elif any(
             keyword in user_input
@@ -219,6 +220,7 @@ Run: {dag_run_id}
         ):
             final_action = "SKIP"
             action_message = "⏭️  수동 처리를 위해 건너뜁니다."
+            requires_more_input = False
 
         elif any(
             keyword in user_input
@@ -226,15 +228,17 @@ Run: {dag_run_id}
         ):
             final_action = "SHOW_REPORT"
             action_message = "📄 전체 분석 보고서를 표시합니다."
+            requires_more_input = True
 
         else:
             # Default: treat as request for more info
             final_action = "SHOW_REPORT"
             action_message = "📄 입력을 이해하지 못했습니다. 전체 보고서를 표시합니다."
+            requires_more_input = True
 
         return {
             "final_action": final_action,
             "action_result": action_message,
-            "requires_user_input": False,
+            "requires_user_input": requires_more_input,
             "current_agent": self.agent_type.value,
         }
