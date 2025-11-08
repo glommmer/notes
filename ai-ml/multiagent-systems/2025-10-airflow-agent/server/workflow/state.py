@@ -60,6 +60,7 @@ class AgentState(TypedDict):
     dag_run_id: Optional[str]
     task_id: Optional[str]
     try_number: Optional[int]
+    target_date: Optional[str]
 
     # Error information
     error_message: Optional[str]
@@ -120,6 +121,7 @@ def create_initial_state(
         dag_run_id=dag_run_id,
         task_id=task_id,
         try_number=1,
+        target_date=None,
         # Error info
         error_message=None,
         logs=None,

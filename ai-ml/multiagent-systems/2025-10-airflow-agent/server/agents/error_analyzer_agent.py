@@ -341,6 +341,7 @@ class ErrorAnalyzerAgent:
         if root_lines:
             root_cause = " ".join(root_lines[:2])[:200]  # Truncate
         if solution_lines:
-            solution = " ".join(solution_lines[:3])[:300]  # Truncate
+            # solution = " ".join(solution_lines[:3])[:300]  # Truncate
+            solution = " ".join(solution_lines)  # Full
 
         return root_cause, solution

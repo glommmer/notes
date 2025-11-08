@@ -279,11 +279,24 @@ async def stream_monitoring_workflow(request: MonitoringRequest):
         if existing_state and request.user_input:
             # 기존 세션에 user_input 추가
             logger.info(f"Continuing existing session {session_id}")
+
+            # 새로운 user_input이 있으면 상태 초기화
             existing_state["user_input"] = request.user_input
             existing_state["requires_user_input"] = False
+
+            # is_resolved를 False로 재설정 (새 요청 처리)
+            if existing_state.get("is_resolved"):
+                logger.info("Resetting is_resolved for new request")
+                existing_state["is_resolved"] = False
+
+            # final_action도 초기화
+            if existing_state.get("final_action"):
+                existing_state["final_action"] = None
+
             initial_state = existing_state
         else:
-            # Create initial state
+            # 새 세션 시작
+            logger.info(f"Starting new session {session_id}")
             initial_state = create_initial_state(
                 dag_id=request.dag_id,
                 dag_run_id=request.dag_run_id,
@@ -377,7 +390,7 @@ async def health_check():
         }
 
 
-# ✅ 세션 상태 관리 함수 추가
+# 세션 상태 관리 함수 추가
 from pathlib import Path
 import json
 
@@ -425,10 +438,6 @@ async def state_aware_event_generator(
         seen_nodes = set()
         current_state = initial_state
 
-        # # user_input이 있고 이미 분석이 완료된 상태라면 interaction부터 시작
-        # if current_state.get("user_input") and current_state.get("analysis_report"):
-        #     logger.info("Resuming from interaction node")
-
         # interaction 노드부터 실행
         for output in app.stream(
             current_state,
@@ -452,29 +461,6 @@ async def state_aware_event_generator(
 
                 # ✅ 상태 저장
                 save_session_state(session_id, current_state)
-
-        # else:
-        #     # 처음부터 실행
-        #     for output in app.stream(
-        #         current_state,
-        #         config={**config, "recursion_limit": 100},
-        #         stream_mode="updates",
-        #     ):
-        #         if not output:
-        #             continue
-        #
-        #         for node_name, node_output in output.items():
-        #             if node_name in seen_nodes:
-        #                 continue
-        #
-        #             seen_nodes.add(node_name)
-        #             current_state.update(node_output)
-        #
-        #             event_data = create_event_data(node_name, node_output)
-        #             yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-        #             await asyncio.sleep(0.05)
-        #
-        #             save_session_state(session_id, current_state)
 
         # Send completion
         completion_event = {"type": "complete", "message": "✅ 워크플로우 완료"}

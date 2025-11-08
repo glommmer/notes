@@ -56,11 +56,31 @@ class UserInteractionAgent:
         """
         logger.info("💬 UserInteractionAgent: Preparing user interaction...")
 
+        # 이미 처리된 user_input인지 체크
+        processed_inputs = state.get("processed_user_inputs", [])
+        current_input = state.get("user_input", "") or ""
+        current_input = current_input.strip()
+
+        if current_input and current_input in processed_inputs:
+            logger.info(f"⏭️ User input '{current_input}' already processed - skipping")
+            return {
+                "requires_user_input": True,
+                "user_question": "다음 조치를 선택해주세요:\n1️⃣ 작업 재시작\n2️⃣ 수동 처리",
+                "user_input": None,  # ✅ 초기화
+                "current_agent": self.agent_type.value,
+            }
+
         # Check if we already have user input
         # 사용자 입력이 이미 있으면 바로 처리
         if state.get("user_input"):
             logger.info("User input already provided, processing...")
-            return self._process_user_input(state)
+            result = self._process_user_input(state)
+
+            # 처리한 입력을 기록
+            processed_inputs.append(current_input)
+            result["processed_user_inputs"] = processed_inputs
+
+            return result
 
         if state.get("requires_user_input") and state.get("user_question"):
             logger.info("Already waiting for user input - no change")
@@ -71,13 +91,6 @@ class UserInteractionAgent:
         # Generate question for user
         # 첫 번째 질문 생성
         question = self._generate_user_question(state)
-
-        # if not state.get("requires_user_input"):
-        #     return {
-        #         "user_question": question,
-        #         "requires_user_input": True,  # ← 처음만!
-        #         "current_agent": self.agent_type.value,
-        #     }
 
         return {
             "user_question": question,
@@ -205,20 +218,44 @@ Run: {dag_run_id}
 
         logger.info(f"Processing user input: {user_input}")
 
-        # 명확한 액션 매핑
+        # LLM을 사용하여 의도 파악 (has_analysis_report 컨텍스트 추가)
+        has_analysis = bool(state.get("analysis_report"))
+        intent = self._classify_intent(user_input, state)
+
+        if intent == "NEW_ANALYSIS" and not has_analysis:
+            # 첫 번째 분석 요청
+            logger.info("Detected new analysis request - needs monitoring")
+            return {
+                "final_action": "NEW_ANALYSIS",
+                "action_result": "새로운 분석 요청을 처리합니다.",
+                "requires_user_input": False,
+                "user_input": None,  # 소비
+                "current_agent": self.agent_type.value,
+            }
+        elif intent == "NEW_ANALYSIS" and has_analysis:
+            # 이미 분석이 완료되었는데 또 NEW_ANALYSIS 요청 = 사용자가 결정하지 않고 계속 분석 요청
+            # 이 경우 사용자에게 결정을 요구
+            logger.info("Analysis already completed - waiting for user decision")
+            return {
+                "final_action": None,
+                "requires_user_input": True,
+                "user_question": "분석이 완료되었습니다.",
+                "user_input": None,  # 소비
+                "current_agent": self.agent_type.value,
+            }
+
+        # 기존 결정 로직 (재실행, 수동, 보고서)
         action_map = {
             "재시작": "CLEAR_TASK",
             "clear": "CLEAR_TASK",
             "retry": "CLEAR_TASK",
             "실행": "CLEAR_TASK",
             "1": "CLEAR_TASK",
-
             "수동": "SKIP",
             "manual": "SKIP",
             "나중": "SKIP",
             "skip": "SKIP",
             "2": "SKIP",
-
             "상세": "SHOW_REPORT",
             "보고서": "SHOW_REPORT",
             "report": "SHOW_REPORT",
@@ -233,50 +270,64 @@ Run: {dag_run_id}
                 break
 
         if not final_action:
-            # 기본값: 보고서 표시
-            final_action = "SHOW_REPORT"
-
-        # # Parse user decision
-        # if any(
-        #     keyword in user_input
-        #     for keyword in ["재실행", "clear", "retry", "다시", "1"]
-        # ):
-        #     final_action = "CLEAR_TASK"
-        #     action_message = "✅ Task를 Clear하여 재실행하겠습니다."
-        #     requires_more_input = False
-        #
-        # elif any(
-        #     keyword in user_input
-        #     for keyword in ["수동", "manual", "직접", "2", "건너뛰", "skip"]
-        # ):
-        #     final_action = "SKIP"
-        #     action_message = "⏭️  수동 처리를 위해 건너뜁니다."
-        #     requires_more_input = False
-        #
-        # elif any(
-        #     keyword in user_input
-        #     for keyword in ["보고서", "분석", "report", "3", "확인"]
-        # ):
-        #     final_action = "SHOW_REPORT"
-        #     action_message = "📄 전체 분석 보고서를 표시합니다."
-        #     requires_more_input = True
-        #
-        # else:
-        #     # Default: treat as request for more info
-        #     final_action = "SHOW_REPORT"
-        #     action_message = "📄 입력을 이해하지 못했습니다. 전체 보고서를 표시합니다."
-        #     requires_more_input = True
-
-        # return {
-        #     "final_action": final_action,
-        #     "action_result": action_message,
-        #     "requires_user_input": requires_more_input,
-        #     "current_agent": self.agent_type.value,
-        # }
+            # 기본값: 결정 대기
+            final_action = None
 
         return {
             "final_action": final_action,
-            "action_result": f"선택된 액션: {final_action}",
-            "requires_user_input": False,
+            "action_result": (
+                f"선택된 액션: {final_action}" if final_action else "결정 대기 중"
+            ),
+            "requires_user_input": not bool(final_action),
+            "user_input": None,  # ✅ 소비
             "current_agent": self.agent_type.value,
         }
+
+    def _classify_intent(self, user_input: str, state: AgentState) -> str:
+        """
+        LLM을 사용하여 사용자 입력의 의도 분류
+
+        Returns:
+            "NEW_ANALYSIS" - 새로운 DAG 분석 요청
+            "DECISION" - 기존 분석에 대한 결정 (재실행/수동/보고서)
+        """
+        # 이전 분석 결과가 있는지 확인
+        has_previous_analysis = bool(state.get("analysis_report"))
+
+        prompt = f"""
+Classify the user's intent from this input:
+
+User Input: "{user_input}"
+
+Context:
+- Previous analysis exists: {has_previous_analysis}
+- Previous DAG: {state.get('dag_id')}
+
+Intent categories:
+1. NEW_ANALYSIS: User is requesting analysis of a specific DAG (has dag name/id)
+   - Examples: "failed_dag 분석", "success_dag 상태 확인"
+
+2. DECISION: User is making a decision about existing analysis
+   - Examples: "재실행", "수동 처리", "보고서 확인", "1", "2"
+   - Examples: Anything that is NOT a specific DAG name
+
+Rules:
+- If user input contains "모든" (all), "전체" (entire), it's still NEW_ANALYSIS but should trigger batch processing
+- If analysis already exists and user input is vague, classify as DECISION
+
+Return only: NEW_ANALYSIS or DECISION
+"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            intent = response.content.strip().upper()
+
+            if intent in ["NEW_ANALYSIS", "DECISION"]:
+                logger.info(f"Classified intent: {intent}")
+                return intent
+            else:
+                logger.warning(f"Unknown intent: {intent}, defaulting to DECISION")
+                return "DECISION" if has_previous_analysis else "NEW_ANALYSIS"
+        except Exception as e:
+            logger.error(f"Failed to classify intent: {e}")
+            return "DECISION" if has_previous_analysis else "NEW_ANALYSIS"

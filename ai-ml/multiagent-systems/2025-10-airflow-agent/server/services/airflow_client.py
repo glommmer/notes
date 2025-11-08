@@ -53,12 +53,22 @@ class AirflowClient:
             "Authorization": f"Bearer {token}",
         }
 
+        def log_request(request):
+            print(f"➡️ Request: {request.method} {request.url}")
+
+        def log_response(response):
+            print(f"⬅️ Response: {response.status_code} from {response.url}")
+
         # Create httpx client with basic auth
         self.client = httpx.Client(
             # auth=(self.username, self.password),
             headers=self.headers,
             timeout=self.timeout,
             follow_redirects=True,
+            event_hooks={
+                "request": [log_request],
+                "response": [log_response],
+            },
         )
 
     def _make_request(
@@ -150,25 +160,81 @@ class AirflowClient:
         return self._make_request("GET", endpoint, params=params)
 
     def get_dag_runs(
-        self, dag_id: str, limit: int = 10, start_date_gte: str = None
-    ) -> Dict[str, Any]:
+        self,
+        dag_id: str = None,
+        state: str = None,
+        start_date_gte: str = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
         """
-        Get specific DAG run details
+        Get DAG runs
 
         Args:
-            dag_id: DAG identifier
+            dag_id: DAG ID (use "~" for all DAGs) [web:37]
+            state: Filter by state (e.g., "failed", "success")
+            start_date_gte: Filter by start date (ISO format)
+            limit: Max number of results
 
         Returns:
-            DAG run details
+            List of DAG run information
         """
+        try:
+            # dag_id가 "~"이면 모든 DAG 조회
+            if dag_id == "~":
+                endpoint = f"/dags/~/dagRuns"
+                logger.info("Fetching DAG runs for all DAGs (wildcard ~)")
+            elif dag_id:
+                endpoint = f"/dags/{dag_id}/dagRuns"
+            else:
+                endpoint = "/dags/~/dagRuns"  # Default to all DAGs
 
-        endpoint = f"/dags/{dag_id}/dagRuns"
-        params = {"limit": limit}
+            params = {
+                "limit": limit,
+                "order_by": "-start_date",
+            }
 
-        if start_date_gte:
-            params["start_date"] = start_date_gte
+            if state:
+                params["state"] = state
 
-        return self._make_request("GET", endpoint, params=params)
+            if start_date_gte:
+                # ISO 8601 형식으로 변환 (YYYY-MM-DD → YYYY-MM-DDTHH:MM:SSZ)
+                from datetime import datetime
+
+                try:
+                    # 입력이 YYYY-MM-DD 형식인지 확인
+                    if len(start_date_gte) == 10 and start_date_gte.count("-") == 2:
+                        # YYYY-MM-DD → YYYY-MM-DDTHH:MM:SSZ
+                        dt = datetime.fromisoformat(start_date_gte)
+                        start_date_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    elif "T" in start_date_gte:
+                        # 이미 ISO 형식이면 Z 추가 (없는 경우)
+                        start_date_iso = (
+                            start_date_gte
+                            if start_date_gte.endswith("Z")
+                            else f"{start_date_gte}Z"
+                        )
+                    else:
+                        start_date_iso = start_date_gte
+
+                    params["start_date_gte"] = start_date_iso
+                    logger.info(f"Using start_date_gte: {start_date_iso}")
+
+                except ValueError:
+                    logger.warning(
+                        f"Invalid date format: {start_date_gte}, using as-is"
+                    )
+                    params["start_date_gte"] = start_date_gte
+
+            response = self._make_request("GET", endpoint, params=params)
+
+            dag_runs = response.get("dag_runs", [])
+            logger.info(f"Found {len(dag_runs)} DAG runs")
+
+            return dag_runs
+
+        except Exception as e:
+            logger.error(f"Failed to get DAG runs: {str(e)}")
+            raise
 
     def get_failed_task_instances(
         self, dag_id: str, dag_run_id: str
@@ -212,7 +278,7 @@ class AirflowClient:
         endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
         return self._make_request("GET", endpoint)
 
-    def get_task_instances(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
+    def get_task_instances(self, dag_id: str, dag_run_id: str) -> List[Dict[str, Any]]:
         """
         Get specific task instance details
 
@@ -224,7 +290,8 @@ class AirflowClient:
             Task instance details
         """
         endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances"
-        return self._make_request("GET", endpoint)
+        result = self._make_request("GET", endpoint)
+        return result.get("task_instances", [])
 
     def get_task_log(
         self,

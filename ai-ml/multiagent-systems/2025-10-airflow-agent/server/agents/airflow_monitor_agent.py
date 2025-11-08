@@ -36,7 +36,7 @@ class AirflowMonitorAgent:
         # Initialize LLM for generating user-friendly messages
         self.llm = ChatOpenAI(
             model=settings.OPENAI_MODEL,
-            temperature=0.5,
+            temperature=0.0,
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_BASE_URL,
         )
@@ -63,23 +63,22 @@ class AirflowMonitorAgent:
         logger.info("🔍 AirflowMonitorAgent: Starting monitoring...")
 
         try:
-            # 이미 분석이 완료된 상태인지 확인
-            if state.get("analysis_report") and state.get("user_input"):
-                logger.info("⏭️ Analysis already done - skipping monitor")
-                return {
-                    "current_agent": self.agent_type.value,
-                    # 기존 상태 유지 (분석 결과, DAG 정보 등)
-                }
-
-            # 1. user_input 분석 추가
+            # user_input 먼저 확인 및 파싱
             user_input = state.get("user_input", "").strip()
 
-            # 2. user_input에서 DAG ID, 날짜 등 추출
             if user_input:
-                # LLM을 사용하여 user_input 파싱
                 logger.info(f"Parsing user input: {user_input}")
                 parsed_request = self._parse_user_request(user_input)
                 logger.info(f"Parsed request: {parsed_request}")
+
+                # action이 "report"이면 dag_id가 null이어도 괜찮음
+                action = parsed_request.get("action")
+
+                if action == "report" and state.get("analysis_report"):
+                    logger.info("User requesting report - skipping monitor")
+                    return {
+                        "current_agent": self.agent_type.value,
+                    }
 
                 # 파싱 결과를 state에 반영
                 if parsed_request.get("dag_id"):
@@ -92,14 +91,70 @@ class AirflowMonitorAgent:
                 if parsed_request.get("task_id"):
                     state["task_id"] = parsed_request["task_id"]
 
-            # 3. dag_id가 있으면 특정 DAG 모니터링 (실패 여부와 무관)
+            # 이미 분석이 완료되었지만, 새로운 dag_id가 user_input에서 추출되었으면 새로 모니터링
+            if state.get("analysis_report"):
+                # 새로운 DAG 요청인지 확인
+                previous_dag = state.get("previous_dag_id")  # 이전 분석한 DAG
+                current_dag = state.get("dag_id")  # 현재 요청한 DAG
+
+                # dag_id가 None이면 스킵 (보고서 요청 또는 잘못된 파싱)
+                if not current_dag:
+                    logger.info("⏭️ No specific DAG requested - skipping monitor")
+                    return {
+                        "current_agent": self.agent_type.value,
+                    }
+
+                # ~ (모든 DAG)는 매번 새로 조회해야 함
+                if current_dag == "~":
+                    logger.info(
+                        "Wildcard DAG request (~) - proceeding to discover all failures"
+                    )
+                    state["analysis_report"] = None
+                    state["root_cause"] = None
+                elif previous_dag and current_dag and previous_dag == current_dag:
+                    logger.info(
+                        "⏭️ Analysis already done for same DAG - skipping monitor"
+                    )
+                    return {
+                        "current_agent": self.agent_type.value,
+                    }
+                elif current_dag and current_dag != previous_dag:
+                    logger.info(
+                        f"New DAG requested ({current_dag}) - proceeding to monitor"
+                    )
+                    state["analysis_report"] = None
+                    state["root_cause"] = None
+                else:
+                    logger.info("⏭️ Analysis already done - skipping monitor")
+                    return {
+                        "current_agent": self.agent_type.value,
+                    }
+
+            # dag_id가 "~"이면 실패한 모든 DAG 발견
+            if state.get("dag_id") == "~":
+                logger.info("Monitoring all DAGs (wildcard ~)")
+                result = self._discover_failures(state)
+
+                if result.get("dag_id"):
+                    result["previous_dag_id"] = "~"  # 와일드카드 요청 기록
+
+                return result
+
+            # 특정 dag_id가 있으면 해당 DAG 모니터링
             if state.get("dag_id"):
                 logger.info(f"Monitoring specific DAG: {state.get('dag_id')}")
-                return self._monitor_specific_dag(state.get("dag_id"), state)
+                result = self._monitor_specific_dag(state.get("dag_id"), state)
+                result["previous_dag_id"] = state.get("dag_id")
+                return result
 
-            # 4. dag_id가 없으면 실패한 DAG 발견
+            # dag_id가 없으면 실패한 DAG 발견
             logger.info("No specific DAG requested - discovering failures")
-            return self._discover_failures(state)
+            result = self._discover_failures(state)
+
+            if result.get("dag_id"):
+                result["previous_dag_id"] = result.get("dag_id")
+
+            return result
 
         except Exception as e:
             logger.error(f"Monitoring error: {str(e)}", exc_info=True)
@@ -112,23 +167,28 @@ class AirflowMonitorAgent:
     def _parse_user_request(self, user_input: str) -> Dict[str, Any]:
         """LLM을 사용하여 user_input에서 DAG ID, 날짜 등 추출"""
         prompt = f"""
-        Extract structured information from this Airflow monitoring request:
+Extract structured information from this Airflow monitoring request:
 
-        User Request: "{user_input}"
-        
-        Extract the following (return JSON only):
-        - dag_id: The DAG identifier (e.g., "success_dag", "failed_dag", "~")
-        - date: Date in YYYY-MM-DD format if mentioned (e.g., "2025년 11월 7일" -> "2025-11-07")
-        - task_id: Task identifier if mentioned (e.g., "failed_dag.task_group_2.task_2_fails", "~")
-        - action: What user wants (e.g., "check_status", "analyze", "clear")
-        
-        Examples:
-        - "success_dag 상태 확인" -> {{"dag_id": "success_dag", "action": "check_status"}}
-        - "failed_dag의 2025년 11월 7일 작업" -> {{"dag_id": "failed_dag", "date": "2025-11-07"}}
-        - "모든 dag 상태 확인" -> {{"dag_id": "~", "date": "~", "task_id": "~"}}
-        
-        Return valid JSON only, no explanation.
-        """
+User Request: "{user_input}"
+
+Extract the following (return JSON only):
+- dag_id: The specific DAG identifier (e.g., "failed_dag", "success_dag")
+  - If user says "모든" (all), "전체" (entire), set dag_id to "~" (Airflow wildcard)
+  - If dag_id cannot be identified, set to null
+  - If user is asking for report/보고서 without DAG name, set to null
+- date: Date in YYYY-MM-DD format if mentioned (otherwise null)
+- task_id: Task identifier if mentioned (otherwise null)
+- action: What user wants (e.g., "check_status", "analyze", "clear", "report")
+
+Examples:
+- "failed_dag 분석" -> {{"dag_id": "failed_dag", "action": "analyze"}}
+- "success_dag의 2025년 11월 7일 작업" -> {{"dag_id": "success_dag", "date": "2025-11-07"}}
+- "모든 DAG 분석" -> {{"dag_id": "~", "action": "analyze"}}  # ~ for all DAGs
+- "2025년 11월 6일 이후 모든 에러" -> {{"dag_id": "~", "date": "2025-11-06", "action": "analyze"}}
+- "보고서로 보여줘" -> {{"dag_id": null, "action": "report"}}
+
+Return valid JSON only, no explanation.
+"""
 
         try:
             response = self.llm.invoke(prompt)
@@ -175,7 +235,7 @@ class AirflowMonitorAgent:
             all_tasks = []
             failed_tasks = []
 
-            for run in dag_runs.get("dag_runs"):  # Check last 3 runs
+            for run in dag_runs:  # Check last 3 runs
                 run_id = run.get("dag_run_id")
                 run_state = run.get("state")
                 dag_id = run.get("dag_id") or dag_id
@@ -184,7 +244,7 @@ class AirflowMonitorAgent:
 
                 task_instances = self.client.get_task_instances(dag_id, run_id)
 
-                for task in task_instances.get("task_instances"):
+                for task in task_instances:
                     task_state = task.get("state")
                     task_info = {
                         "dag_id": dag_id,
@@ -250,25 +310,49 @@ class AirflowMonitorAgent:
             }
 
     def _discover_failures(self, state: AgentState) -> Dict[str, Any]:
-        """Discover failed DAG runs (original logic)"""
+        """Discover failed DAG runs"""
         logger.info("Discovering failed DAG runs...")
 
         try:
-            # Get failed DAG runs from last 24 hours
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, UTC
 
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(hours=24)
+            # target_date가 있으면 해당 날짜 이후, 없으면 최근 24시간
+            target_date = state.get("target_date")
 
-            failed_runs = self.client.get_dag_runs(
-                state="failed", start_date_gte=start_date.isoformat(), limit=10
-            )
+            if target_date:
+                start_date_str = target_date
+                logger.info(f"Searching for failures since: {target_date}")
+            else:
+                end_date = datetime.now(UTC)
+                start_date = end_date - timedelta(hours=24)
+                start_date_str = start_date.strftime("%Y-%m-%d")
+                logger.info(f"Searching for failures in last 24 hours")
 
-            logger.info(f"Found {len(failed_runs)} failed DAG runs")
+            # dag_id="~" 또는 None이면 모든 DAG 조회
+            dag_id = state.get("dag_id")
+
+            if dag_id == "~":
+                # Get failed runs from all DAGs
+                failed_runs = self.client.get_dag_runs(
+                    dag_id="~",
+                    state="failed",
+                    start_date_gte=start_date_str,
+                    limit=50,  # 더 많이 조회
+                )
+                logger.info(f"Found {len(failed_runs)} failed DAG runs across all DAGs")
+            else:
+                # Get failed runs from specific DAG
+                failed_runs = self.client.get_dag_runs(
+                    dag_id,
+                    state="failed",
+                    start_date_gte=start_date_str,
+                    limit=10,
+                )
+                logger.info(f"Found {len(failed_runs)} failed runs for DAG {dag_id}")
 
             if not failed_runs:
                 return {
-                    "monitoring_result": "✅ 지난 24시간 동안 실패한 DAG가 없습니다.",
+                    "monitoring_result": f"✅ {start_date_str} 이후로 실패한 DAG가 없습니다.",
                     "is_resolved": True,
                     "next_agent": "end",
                     "current_agent": self.agent_type.value,
@@ -286,7 +370,6 @@ class AirflowMonitorAgent:
             failed_tasks = [t for t in task_instances if t.get("state") == "failed"]
 
             if not failed_tasks:
-                # Skip to next failed run
                 logger.warning(f"No failed tasks found in {dag_id}/{run_id}")
                 return {
                     "monitoring_result": "실패한 작업을 찾을 수 없습니다.",
@@ -307,7 +390,8 @@ class AirflowMonitorAgent:
                 "task_id": first_task.get("task_id"),
                 "try_number": first_task.get("try_number", 1),
                 "failed_tasks": failed_tasks,
-                "monitoring_result": f"실패한 DAG 발견: {dag_id}",
+                "total_failed_runs": len(failed_runs),  # 전체 실패 수
+                "monitoring_result": f"실패한 DAG 발견: {dag_id} (총 {len(failed_runs)}개 실패)",
                 "next_agent": "analyzer",
                 "current_agent": self.agent_type.value,
             }

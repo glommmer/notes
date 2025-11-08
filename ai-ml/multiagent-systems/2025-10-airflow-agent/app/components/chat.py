@@ -345,7 +345,8 @@ def render_agent_message(
                         st.error(f"📌 Root Cause: {data['root_cause']}")
                     if data.get("analysis_report"):
                         with st.expander("📊 Analysis Report"):
-                            st.markdown(data["analysis_report"][:500])
+                            # st.markdown(data["analysis_report"][:500])
+                            st.markdown(data["analysis_report"])
 
                 elif agent == "INTERACTION":
                     if data.get("user_question"):

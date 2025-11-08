@@ -62,7 +62,9 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
         logger.info("Nodes added to workflow")
 
         # Define conditional routing functions
-        def should_analyze(state: AgentState) -> Literal["analyzer", "interaction", "end"]:
+        def should_analyze(
+            state: AgentState,
+        ) -> Literal["analyzer", "interaction", "end"]:
             """
             Decide whether to proceed to analysis
 
@@ -105,7 +107,9 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
             logger.info("Proceeding to user interaction")
             return "interaction"
 
-        def should_act(state: AgentState) -> Literal["action", "interaction", "end"]:
+        def should_act(
+            state: AgentState,
+        ) -> Literal["action", "interaction", "monitor", "end"]:
             """
             Decide whether to execute action or wait for user input
 
@@ -114,6 +118,11 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
                 "interaction" if waiting for input
                 "end" if resolved
             """
+            # NEW_ANALYSIS 액션이면 monitor로 되돌아가기
+            if state.get("final_action") == "NEW_ANALYSIS":
+                logger.info("🔄 New analysis requested - returning to monitor")
+                return "monitor"
+
             # 오류 존재 여부 체크
             if state.get("is_resolved"):
                 logger.info("Issue already resolved - workflow ending")
@@ -123,7 +132,9 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
             max_iterations = state.get("max_iterations", 20)
 
             if iteration_count >= max_iterations:
-                logger.warning(f"⏱️ Max iterations {max_iterations} reached - ending workflow")
+                logger.warning(
+                    f"⏱️ Max iterations {max_iterations} reached - ending workflow"
+                )
                 return "end"
 
             if state.get("requires_user_input"):
@@ -133,23 +144,15 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
                     return "action"
                 else:
                     # 입력이 대기 중이면 END로 종료
-                    logger.info(f"⏳ Iteration {iteration_count}: Waiting for user input...")
+                    logger.info(
+                        f"⏳ Iteration {iteration_count}: Waiting for user input..."
+                    )
                     return "end"
-
-            # # Check if we're waiting for user input
-            # if state.get("requires_user_input") and not state.get("user_input"):
-            #     logger.info("Waiting for user input - staying in interaction")
-            #     return "interaction"
 
             # Check if we have a decision
             if state.get("final_action"):
                 logger.info("Proceeding to action execution")
                 return "action"
-
-            # # Process user input if available
-            # if state.get("user_input"):
-            #     logger.info("Processing user input")
-            #     return "interaction"
 
             logger.warning("No clear path forward - workflow ending")
             return "end"
@@ -189,11 +192,13 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
 
         # Add edges with conditional routing
         workflow.add_conditional_edges(
-            "monitor", should_analyze, {
+            "monitor",
+            should_analyze,
+            {
                 "analyzer": "analyzer",
                 "interaction": "interaction",
                 "end": END,
-            }
+            },
         )
 
         workflow.add_conditional_edges(
@@ -203,7 +208,12 @@ def create_monitoring_graph(session_id: str = None) -> StateGraph:
         workflow.add_conditional_edges(
             "interaction",
             should_act,
-            {"action": "action", "interaction": "interaction", "end": END},
+            {
+                "action": "action",
+                "interaction": "interaction",
+                "monitor": "monitor",
+                "end": END,
+            },
         )
 
         workflow.add_conditional_edges(
